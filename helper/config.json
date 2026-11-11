@@ -1,0 +1,24 @@
+{
+  "port": 8770,
+  "motionbricks_dir": "C:\\Users\\User\\motionbricks",
+  "blender_exe": "D:\\blender.exe",
+  "animationlab_root": "D:\\AnimationLab",
+  "source_fbx_dir": "source_fbx",
+  "soma_bvh_dir": "soma_bvh",
+  "generated_dir": "generated",
+  "export_fbx_dir": "export_fbx",
+  "cache_dir": "helper_cache",
+  "precision": "fp32",
+  "device": "cuda:0",
+  "allowed_origins": ["https://masaya-heywood.github.io"],
+  "allow_localhost_origins": true,
+  "blender_timeout_seconds": 240,
+  "defaults": {
+    "poses_to_use": 4,
+    "target_offset": { "forward": 0.0, "right": 0.0, "turn_deg": 0.0 },
+    "tokens": null,
+    "include_mesh": false,
+    "variants": 1
+  },
+  "comment": "Relative *_dir entries are resolved under animationlab_root. Edit the three paths at the top if your install lives somewhere else, or pass --config other.json to server.py."
+}

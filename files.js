@@ -281,7 +281,28 @@ export function listFbxEntries() {
   return clips;
 }
 
+// Generated clips fetched from the local helper. They live in memory only and are never listed in the tree.
+const virtualFiles = new Map(); // path -> { path, name, size, lastModified, file }
+
+export function registerVirtualFile(path, blob) {
+  const p = normalizeRel(path);
+  const name = p.split("/").pop();
+  const file = blob instanceof File ? blob : new File([blob], name, { type: "application/octet-stream" });
+  virtualFiles.set(p, { path: p, name, size: file.size, lastModified: Date.now(), file });
+  return p;
+}
+
+export function unregisterVirtualFile(path) {
+  virtualFiles.delete(normalizeRel(path));
+}
+
+export function isVirtualPath(path) {
+  return virtualFiles.has(normalizeRel(path));
+}
+
 export async function getFile(path) {
+  const virt = virtualFiles.get(normalizeRel(path));
+  if (virt) return virt.file;
   const rec = current.files.get(normalizeRel(path));
   if (!rec) throw new Error("File not found in the open folder: " + path);
   if (rec.file) return rec.file;
@@ -591,7 +612,9 @@ export function downloadBlob(filename, blob) {
 export const PAIR_NOTE =
   "Input for a future MotionBricks / SOMA batch script. " +
   "clip paths are relative to the FBX root. frame is an integer at 30 fps " +
-  "display time. BVH conversion is a later step; this file does not launch MotionBricks.";
+  "display time. name (optional) is the output name the local helper uses for the generated BVH/FBX; " +
+  "options.target_offset (optional) places the end pose {forward, right (m), turn_deg}. " +
+  "Saving this file does not launch anything; use Generate with the local helper running.";
 
 export function defaultPairsDoc() {
   return { version: 1, note: PAIR_NOTE, pairs: [] };

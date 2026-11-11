@@ -28,6 +28,7 @@
         </select>
       </label>
       <div id="clip-count"></div>
+      <button id="helper-pill" type="button" class="off" title="Optional local helper that runs MotionBricks. Click for setup.">Helper: checking…</button>
     </header>
 
     <aside id="sidebar">
@@ -53,6 +54,13 @@
         <div id="pairs-actions">
           <button id="save-pairs-btn" type="button">Save pairs.json</button>
           <button id="load-pairs-btn" type="button">Open pairs.json</button>
+          <button id="generate-all-btn" type="button" disabled title="Needs the local helper">Generate all</button>
+        </div>
+        <div id="gen-options" title="Where the end pose is placed relative to the start pose, in the start pose's heading frame. Leave at 0 to keep the end pose where it is in its own clip.">
+          <span>End pose offset</span>
+          <label>fwd <input id="opt-forward" type="number" step="0.05" value="0" /> m</label>
+          <label>right <input id="opt-right" type="number" step="0.05" value="0" /> m</label>
+          <label>turn <input id="opt-turn" type="number" step="5" value="0" /> &deg;</label>
         </div>
         <div id="pairs-list"></div>
       </div>
@@ -68,6 +76,15 @@
         </div>
       </div>
       <div id="hud" hidden></div>
+      <div id="compare-bar" hidden>
+        <span id="compare-title"></span>
+        <button id="cmp-start" type="button">Start clip</button>
+        <button id="cmp-gen" type="button">Generated</button>
+        <select id="cmp-variant" hidden></select>
+        <button id="cmp-end" type="button">End clip</button>
+        <button id="cmp-close" type="button" title="Hide this bar">&times;</button>
+        <div id="compare-note"></div>
+      </div>
       <details id="details-panel" hidden>
         <summary>Details</summary>
         <div id="details-status"></div>
@@ -127,6 +144,17 @@
         <span style="flex:1"></span>
         <button id="name-map-cancel" type="button">Cancel</button>
         <button id="name-map-save" type="button" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+  <div id="helper-modal" class="modal hidden" role="dialog" aria-labelledby="helper-modal-title">
+    <div class="modal-card">
+      <h2 id="helper-modal-title">Local MotionBricks helper</h2>
+      <div id="helper-modal-body"></div>
+      <div class="modal-actions">
+        <span style="flex:1"></span>
+        <button id="helper-recheck" type="button">Check again</button>
+        <button id="helper-modal-close" type="button" class="primary">Close</button>
       </div>
     </div>
   </div>

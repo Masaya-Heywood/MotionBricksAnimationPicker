@@ -11,7 +11,8 @@ Your clips stay on your computer. This repository does **not** include any anima
 - Preview clips on a real character mesh when one is in the folder. **Body → Auto** uses a small preset table (Kevin Iglesias → `HumanM_Model`, PROTOFACTOR → `SK_Protof-Actor`) and otherwise picks the mesh model in the same pack folder with the best bone-name overlap. You can also choose **Skeleton only** or a specific body.
 - Same-skeleton clips (about 90% of bone names match) bind directly. Cross-pack previews use rest-pose delta retargeting. Open **Details** for unmatched tracks, and **Name map** to edit synonyms.
 - Star clips and add notes (saved in this browser only). **Export starred CSV** downloads a spreadsheet you can use as start/end candidates.
-- **Set Start** / **Set End** / **Send to Inbetweener** builds a `pairs.json` list of start and end poses. This is only a pose list for a future batch script. It does not launch MotionBricks or convert to BVH.
+- **Set Start** / **Set End** / **Send to Inbetweener** builds a `pairs.json` list of start and end poses.
+- **Generate** (optional): with the [local MotionBricks helper](helper/README.md) running on your PC, each pair gets a Generate button. The helper converts the two poses to SOMA BVH, runs NVIDIA MotionBricks, retargets the result onto the start clip's rig, exports an FBX, and the page plays it back with a Start clip / Generated / End clip comparison bar. Without the helper nothing changes: the header pill just says "Helper: not running".
 - **Save pairs.json** writes that list to a file you choose (Chrome/Edge can remember the file and overwrite it). Other browsers download the file instead. **Open pairs.json** loads an existing list.
 
 ## Supported browsers
@@ -47,9 +48,15 @@ Then open `http://localhost:8765`. Serving over `file://` is not recommended (mo
 
 To publish on GitHub Pages: push this folder as the repo root (or copy these files there), then in the repo settings enable Pages from the `main` branch, `/ (root)`. A `.nojekyll` file is included so GitHub does not process the vendor files.
 
+## Local MotionBricks helper (optional)
+
+`helper/` is a small Python program you run on your own PC. It exposes `http://127.0.0.1:8770` to this page (CORS restricted to the Pages origin and localhost) and drives Blender plus MotionBricks. Setup, bone maps, what is tested and what is not: [helper/README.md](helper/README.md). Quick start on Windows: double-click `helper\Start-Helper.bat`, wait for "ready" (the header pill turns green by itself), and click **Generate** on a pair.
+
 ## Privacy
 
 **Files you open never leave your machine.** The page reads them locally in your browser. Nothing is uploaded to GitHub, to this site's host, or to any other server. Stars, notes, and a cache of “is this FBX a character mesh?” stay in your browser (`localStorage` and IndexedDB). The last folder and `pairs.json` file handles, when the browser supports them, are also stored only in IndexedDB on your computer.
+
+The helper reads clips from the folder named in `helper/config.json` on your PC and writes BVH/FBX next to them; nothing is sent over the network (it only listens on 127.0.0.1).
 
 Do not add paid or licensed FBX files to this repository. Keep those packs on your own disk and open them with the folder picker.
 
@@ -58,13 +65,15 @@ Do not add paid or licensed FBX files to this repository. Keep those packs on yo
 ```json
 {
   "version": 1,
-  "note": "Input for a future MotionBricks / SOMA batch script. clip paths are relative to the FBX root. frame is an integer at 30 fps display time. BVH conversion is a later step; this file does not launch MotionBricks.",
+  "note": "Input for a future MotionBricks / SOMA batch script. clip paths are relative to the FBX root. frame is an integer at 30 fps display time. name (optional) is the output name the local helper uses for the generated BVH/FBX; options.target_offset (optional) places the end pose {forward, right (m), turn_deg}. Saving this file does not launch anything; use Generate with the local helper running.",
   "pairs": [
     {
       "id": "<uuid>",
       "start": { "clip": "relative/path/to/clip.fbx", "frame": 30 },
       "end":   { "clip": "relative/path/to/other.fbx", "frame": 0 },
       "variants": 1,
+      "name": "optional output name, e.g. CombatIdle1H01_f10__Attack1H01_R_f12_35cf68",
+      "options": { "target_offset": { "forward": 0.0, "right": 0.0, "turn_deg": 0.0 } },
       "note": "optional text",
       "created": "2026-11-10T21:00:00Z"
     }
@@ -82,7 +91,7 @@ Clip paths are relative to the folder you opened. Frame numbers use the 30 fps d
 - External texture files sitting next to an FBX may not always show up; embedded textures usually do. Fingers, props, and weapons only appear if they are in the FBX itself.
 - Mesh-model detection (so animation-only files do not appear in the Body menu) runs in the browser. A file is listed only if it is a genuine character mesh: skinned Geometry with a substantial vertex count, and either a model-like name or folder (`SK_`, `_Model`, `Models/`, `Characters/`) or almost no animation curves. Clips named with `@`, files under `Animations/`, and skinned files that carry a full clip are excluded; if in doubt, the file is left out. Results are cached in IndexedDB by path, size, and last-modified time (cache version 2).
 - Auto body matching is configurable in `body-presets.json` if you fork the project.
-- This tool is for preview and picking poses. It does not write clips back out, and it does not talk to Unity or MotionBricks.
+- On its own this tool is for preview and picking poses: it does not write clips back out and does not talk to Unity. Generating in-betweens needs the separate local helper in `helper/`, which runs on your PC (Windows, NVIDIA GPU, Blender, MotionBricks v0.2.0). The page only talks to `127.0.0.1` for that, and only if you start the helper. See [helper/README.md](helper/README.md).
 
 ## Credits and licenses
 

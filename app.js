@@ -14,6 +14,19 @@ import {
 } from "./retarget.js";
 import { createTreeList } from "./tree.js";
 import {
+  checkHealth,
+  startGenerate,
+  getJob,
+  cancelJob,
+  existingResults,
+  fetchResultBuffer,
+  pairName,
+  variantSuffix,
+  resultUrl,
+  helperBaseUrl,
+  SETUP_STEPS,
+} from "./helper.js";
+import {
   supportsDirectoryPicker,
   supportsSaveFilePicker,
   ingestDirectoryHandle,
@@ -22,6 +35,9 @@ import {
   getCurrentFolder,
   listFbxEntries,
   getArrayBuffer,
+  registerVirtualFile,
+  unregisterVirtualFile,
+  isVirtualPath,
   resolveLocalResource,
   detectModels,
   downloadBlob,
@@ -101,6 +117,23 @@ const el = {
   savePairsBtn: $("save-pairs-btn"),
   loadPairsBtn: $("load-pairs-btn"),
   pairsInput: $("pairs-input"),
+  helperPill: $("helper-pill"),
+  helperModal: $("helper-modal"),
+  helperModalBody: $("helper-modal-body"),
+  helperRecheck: $("helper-recheck"),
+  helperModalClose: $("helper-modal-close"),
+  generateAllBtn: $("generate-all-btn"),
+  optForward: $("opt-forward"),
+  optRight: $("opt-right"),
+  optTurn: $("opt-turn"),
+  compareBar: $("compare-bar"),
+  compareTitle: $("compare-title"),
+  compareNote: $("compare-note"),
+  cmpStart: $("cmp-start"),
+  cmpGen: $("cmp-gen"),
+  cmpEnd: $("cmp-end"),
+  cmpVariant: $("cmp-variant"),
+  cmpClose: $("cmp-close"),
 };
 
 let allClips = [];
@@ -749,7 +782,18 @@ function loadFbxSerialized(path) {
     const folder = slash >= 0 ? path.slice(0, slash + 1) : "";
     manager.setURLModifier((url) => resolveLocalResource(url, folder) || url);
     const inst = new FBXLoader(manager);
-    return inst.parse(buf, folder);
+    const parsed = inst.parse(buf, folder);
+    if (isVirtualPath(path)) {
+      // Blender's exporter writes constant scale tracks (B-root = 100) that would blow the rig up when bound.
+      const lists = [parsed.animations || []];
+      parsed.traverse((o) => {
+        if (o !== parsed && o.animations && o.animations.length) lists.push(o.animations);
+      });
+      for (const list of lists) {
+        for (const clip of list) clip.tracks = clip.tracks.filter((t) => !/\.scale$/.test(t.name));
+      }
+    }
+    return parsed;
   };
   const p = fbxChain.then(run, run);
   fbxChain = p.then(
@@ -1097,7 +1141,8 @@ function presentClipObject(object, path, fallbackNote) {
   updateTrackDebug(mapInfo, false);
 }
 
-function loadClip(path) {
+function loadClip(path, opts = {}) {
+  if (!opts.keepCompare) hideCompare();
   const clipInfo = allClips.find((c) => c.path === path);
   const gen = ++loadGen;
   disposeCurrent();
@@ -1178,6 +1223,7 @@ function loadClip(path) {
       return;
     }
     presentClipObject(object, path, "");
+    if (typeof opts.hook === "function") opts.hook();
   };
   run().catch((err) => {
     if (gen !== loadGen) return;
@@ -1229,9 +1275,10 @@ function setPose(which) {
 function renderPairs() {
   if (!el.pairsList) return;
   if (el.pairsCount) el.pairsCount.textContent = String(pairs.length);
+  updateGenerateAll();
   if (!pairs.length) {
     el.pairsList.innerHTML =
-      '<div class="empty-list" style="padding:8px 12px">No pairs yet. Set a start and end frame, then send them for the future batch script. This does not launch MotionBricks.</div>';
+      '<div class="empty-list" style="padding:8px 12px">No pairs yet. Set a start and end frame, then Send to Inbetweener. With the local helper running you can Generate the in-between right here.</div>';
     return;
   }
   el.pairsList.innerHTML = pairs
@@ -1239,12 +1286,50 @@ function renderPairs() {
       const s = (p.start && p.start.clip ? p.start.clip.split("/").pop() : "?") + " f" + (p.start && p.start.frame);
       const e = (p.end && p.end.clip ? p.end.clip.split("/").pop() : "?") + " f" + (p.end && p.end.frame);
       const note = p.note ? `<div class="pair-note">${escapeHtml(p.note)}</div>` : "";
-      return `<div class="pair-item" data-pair-id="${escapeHtml(p.id || "")}">
-        <div class="pair-body">${escapeHtml(s)} → ${escapeHtml(e)} · ${p.variants || 1} var${note}</div>
-        <button type="button" data-delete-pair="${escapeHtml(p.id || "")}">Delete</button>
+      const id = escapeHtml(p.id || "");
+      const g = gen.get(p.id);
+      const running = g && (g.state === "running" || g.state === "queued");
+      const hasResults = g && g.results && g.results.length && g.state !== "running";
+      const genTitle = helperState.ready
+        ? "Run MotionBricks for this pair"
+        : helperState.online
+          ? "The helper needs setup (click the Helper pill)"
+          : "Start the local helper first (click the Helper pill)";
+      const buttons =
+        (running
+          ? `<button type="button" data-cancel-pair="${id}">Cancel</button>`
+          : `<button type="button" data-generate-pair="${id}" title="${escapeHtml(genTitle)}"${helperState.ready ? "" : " disabled"}>Generate</button>`) +
+        (hasResults ? `<button type="button" class="view-gen" data-view-pair="${id}">View</button>` : "") +
+        `<button type="button" data-delete-pair="${id}">Delete</button>`;
+      return `<div class="pair-item" data-pair-id="${id}">
+        <div class="pair-top">
+          <div class="pair-body">${escapeHtml(s)} → ${escapeHtml(e)} · ${p.variants || 1} var${note}</div>
+          <div class="pair-buttons">${buttons}</div>
+        </div>
+        ${renderGenStatus(p, g)}
       </div>`;
     })
     .join("");
+}
+
+function renderGenStatus(p, g) {
+  if (!g || g.state === "idle") return "";
+  const pct = Math.round((g.progress || 0) * 100);
+  let line = "";
+  if (g.state === "running" || g.state === "queued") {
+    line = `<span>${escapeHtml(g.state === "queued" ? "queued…" : g.step || "working…")} · ${pct}%</span><span class="bar"><i style="width:${pct}%"></i></span>`;
+  } else if (g.state === "done") {
+    const vs = (g.results || []).map((r) => "v" + r.variant + (r.seconds ? " " + r.seconds + "s" : "")).join(", ");
+    const warn = g.warnings && g.warnings.length ? ` <span title="${escapeHtml(g.warnings.join("\n"))}">⚠ ${g.warnings.length}</span>` : "";
+    line = `<span class="state-done">${g.fromDisk ? "on disk" : "done"}</span><span>${escapeHtml(vs)}</span>${warn}${g.engine === "mock" ? " <span>(mock engine)</span>" : ""}`;
+  } else if (g.state === "error" || g.state === "cancelled") {
+    line = `<span class="state-error">${escapeHtml(g.state === "cancelled" ? "cancelled" : g.error || "failed")}</span>`;
+  }
+  const log =
+    g.lines && g.lines.length
+      ? `<details class="pair-log" data-log-id="${escapeHtml(p.id)}"${openLogs.has(p.id) ? " open" : ""}><summary>log</summary><pre>${escapeHtml(g.lines.slice(-60).join("\n"))}</pre></details>`
+      : "";
+  return `<div class="pair-gen">${line}${log}</div>`;
 }
 
 function persistPairsLocal() {
@@ -1293,6 +1378,9 @@ async function sendPair() {
     note: String((el.note && el.note.value) || "").slice(0, 2000),
     created: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
   };
+  item.name = pairName(item);
+  const offset = currentTargetOffset();
+  if (offset) item.options = { target_offset: offset };
   pairs.push(item);
   markPairsDirty();
   renderPairs();
@@ -1311,8 +1399,8 @@ async function sendPair() {
     "idle",
     wrote ? "Pair saved" : "Pair added",
     wrote
-      ? "Wrote to " + (pairsPath || "pairs.json") + ". This is only a list of start/end poses for a future batch script. It does not launch MotionBricks; BVH conversion is the next step."
-      : "Added to the list in this browser. Click Save pairs.json to write the file to disk (Chrome and Edge can remember the file). This does not launch MotionBricks."
+      ? "Wrote to " + (pairsPath || "pairs.json") + ". Use Generate on the pair to run MotionBricks (needs the local helper)."
+      : "Added to the list in this browser. Click Save pairs.json to write the file to disk (Chrome and Edge can remember the file). Generate runs MotionBricks through the local helper."
   );
   setTimeout(() => {
     const t = el.overlay.querySelector("h2")?.textContent;
@@ -1325,6 +1413,7 @@ async function deletePair(id) {
   const before = pairs.length;
   pairs = pairs.filter((p) => String(p.id) !== String(id));
   if (pairs.length === before) return;
+  gen.delete(id);
   markPairsDirty();
   renderPairs();
   if (pairsHandle) {
@@ -1531,8 +1620,29 @@ if (el.sendPairBtn) el.sendPairBtn.addEventListener("click", sendPair);
 if (el.pairsList) {
   el.pairsList.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-delete-pair]");
-    if (btn) deletePair(btn.getAttribute("data-delete-pair"));
+    if (btn) return void deletePair(btn.getAttribute("data-delete-pair"));
+    const find = (attr) => {
+      const b = e.target.closest("[" + attr + "]");
+      return b ? pairs.find((p) => String(p.id) === b.getAttribute(attr)) : null;
+    };
+    const gp = find("data-generate-pair");
+    if (gp) return void generatePair(gp, { autoView: true });
+    const cp = find("data-cancel-pair");
+    if (cp) return void cancelPair(cp);
+    const vp = find("data-view-pair");
+    if (vp) return void viewPair(vp, "gen", 1);
   });
+  el.pairsList.addEventListener(
+    "toggle",
+    (e) => {
+      const d = e.target;
+      if (!d || !d.classList || !d.classList.contains("pair-log")) return;
+      const id = d.getAttribute("data-log-id");
+      if (d.open) openLogs.add(id);
+      else openLogs.delete(id);
+    },
+    true
+  );
 }
 if (el.openFolderBtn) el.openFolderBtn.addEventListener("click", () => openAnimationFolder(false));
 if (el.reopenFolderBtn) el.reopenFolderBtn.addEventListener("click", () => reopenLastFolder());
@@ -1674,6 +1784,329 @@ window.__clipDebug = function () {
   };
 };
 
+// --- local helper: generate in-betweens with MotionBricks -------------------------------------
+// Optional. Everything below is inert unless the helper (helper/server.py) answers on 127.0.0.1.
+const gen = new Map(); // pairId -> { jobId, state, step, progress, lines, error, warnings, results, engine, fromDisk }
+const openLogs = new Set();
+let helperState = { online: false, ready: false, mock: false, problems: [], data: null };
+let helperTimer = null;
+let viewing = null; // { pairId, which, variant }
+
+function currentTargetOffset() {
+  const f = Number(el.optForward && el.optForward.value) || 0;
+  const r = Number(el.optRight && el.optRight.value) || 0;
+  const t = Number(el.optTurn && el.optTurn.value) || 0;
+  if (!f && !r && !t) return null;
+  return { forward: f, right: r, turn_deg: t };
+}
+
+function updateHelperPill() {
+  const pill = el.helperPill;
+  if (!pill) return;
+  pill.classList.remove("on", "warn", "off", "mock");
+  if (!helperState.online) {
+    pill.classList.add("off");
+    pill.textContent = "Helper: not running";
+    pill.title = "No local helper found at " + helperBaseUrl() + ". Click for setup. The browser works without it.";
+  } else if (!helperState.ready) {
+    pill.classList.add("warn");
+    pill.textContent = "Helper: needs setup";
+    pill.title = (helperState.problems || []).join("\n") || "The helper is running but not ready.";
+  } else if (helperState.mock) {
+    pill.classList.add("mock", "on");
+    pill.textContent = "Helper: connected (MOCK engine)";
+    pill.title = "The helper is running with --mock: results are a linear blend, not MotionBricks.";
+  } else {
+    pill.classList.add("on");
+    pill.textContent = "Helper: connected";
+    const d = helperState.data || {};
+    pill.title = [d.gpu && d.gpu.name, d.blender && "Blender " + d.blender.version].filter(Boolean).join(" · ");
+  }
+}
+
+function updateGenerateAll() {
+  if (!el.generateAllBtn) return;
+  const idle = pairs.filter((p) => {
+    const g = gen.get(p.id);
+    return !g || (g.state !== "running" && g.state !== "queued");
+  });
+  el.generateAllBtn.disabled = !helperState.ready || !idle.length;
+  el.generateAllBtn.title = helperState.ready ? "Generate every pair that is not running" : "Needs the local helper";
+}
+
+async function refreshHelper() {
+  const was = helperState.online;
+  helperState = await checkHealth();
+  updateHelperPill();
+  updateGenerateAll();
+  if (helperState.online && !was) refreshExisting();
+  if (helperState.online !== was || el.helperModal.classList.contains("hidden") === false) {
+    renderPairs();
+    if (!el.helperModal.classList.contains("hidden")) fillHelperModal();
+  }
+}
+
+function startHelperPolling() {
+  refreshHelper();
+  clearInterval(helperTimer);
+  helperTimer = setInterval(() => {
+    if (!document.hidden) refreshHelper();
+  }, 4000);
+}
+
+async function refreshExisting() {
+  if (!helperState.online || !pairs.length) return;
+  try {
+    const names = pairs.map((p) => pairName(p));
+    const found = await existingResults(names);
+    for (const p of pairs) {
+      const hit = found[pairName(p)];
+      const g = gen.get(p.id);
+      if (!hit || (g && (g.state === "running" || g.state === "queued"))) continue;
+      gen.set(p.id, {
+        state: "done",
+        fromDisk: true,
+        progress: 1,
+        lines: [],
+        warnings: [],
+        engine: hit.engine || null,
+        results: hit.variants.map((v) => ({ variant: v })),
+      });
+    }
+    renderPairs();
+  } catch (err) {
+    console.warn("Could not list existing generated clips", err);
+  }
+}
+
+function fillHelperModal() {
+  const d = helperState.data;
+  let html = "";
+  if (!helperState.online) {
+    html += `<p>The helper is a small program on your PC that connects this page to MotionBricks. It is optional: browsing, Set Start / End and pairs.json work without it.</p>
+      <p><strong>Not running</strong> (nothing answered at <code>${escapeHtml(helperBaseUrl())}</code>).</p>
+      <p>${escapeHtml(SETUP_STEPS)}</p>
+      <p>If it is running and this still says not running, your browser may be blocking a web page from reaching your own PC. Chrome asks for a one-time “local network” permission the first time; allow it. Also check that nothing else uses port 8770.</p>`;
+  } else {
+    html += `<p><strong>${helperState.ready ? "Connected" : "Running, but not ready"}</strong>${helperState.mock ? " (MOCK engine: linear blend, not MotionBricks)" : ""}.</p>`;
+    if (helperState.problems && helperState.problems.length) {
+      html += "<ul>" + helperState.problems.map((x) => `<li>${escapeHtml(x)}</li>`).join("") + "</ul>";
+    }
+    if (d) {
+      const rows = [
+        ["Helper version", d.helper_version],
+        ["GPU", d.gpu && (d.gpu.name || d.gpu.reason)],
+        ["Blender", d.blender && (d.blender.version || "not found") + " (" + d.blender.path + ")"],
+        ["MotionBricks", d.motionbricks ? (d.motionbricks.version || "?") + (d.motionbricks.importable ? ", importable" : ", NOT importable") : "mock"],
+        ["Animation folder", d.paths && d.paths.source && d.paths.source.path + (d.paths.source.exists ? "" : " (missing)")],
+        ["Outputs", d.paths && ["soma_bvh", "generated", "export_fbx"].map((k) => d.paths[k] && d.paths[k].path).filter(Boolean).join(" | ")],
+      ];
+      html += "<ul>" + rows.filter((r) => r[1]).map((r) => `<li>${escapeHtml(r[0])}: <code>${escapeHtml(String(r[1]))}</code></li>`).join("") + "</ul>";
+    }
+  }
+  el.helperModalBody.innerHTML = html;
+}
+
+function openHelperModal() {
+  fillHelperModal();
+  el.helperModal.classList.remove("hidden");
+}
+
+// -- generation ---------------------------------------------------------------------------------
+function topSegment(path) {
+  const parts = String(path || "").split("/");
+  return parts.length > 1 ? parts[0] : "";
+}
+
+function virtualPathFor(pair, variant) {
+  const top = topSegment(pair.start && pair.start.clip);
+  return (top ? top + "/" : "") + "__generated__/" + pairName(pair) + variantSuffix(variant) + ".fbx";
+}
+
+function dropVirtualFor(pair) {
+  for (let v = 1; v <= 32; v++) unregisterVirtualFile(virtualPathFor(pair, v));
+}
+
+async function generatePair(pair, { autoView = false } = {}) {
+  if (!helperState.ready) {
+    openHelperModal();
+    return;
+  }
+  const old = gen.get(pair.id);
+  if (old && (old.state === "running" || old.state === "queued")) return;
+  if (!pair.name) {
+    pair.name = pairName(pair);
+    markPairsDirty();
+  }
+  dropVirtualFor(pair);
+  const entry = { state: "queued", step: "queued", progress: 0, lines: [], warnings: [], results: [], error: null, since: 0, autoView };
+  gen.set(pair.id, entry);
+  renderPairs();
+  const body = {
+    id: pair.id,
+    name: pairName(pair),
+    start: pair.start,
+    end: pair.end,
+    variants: pair.variants || 1,
+    options: { target_offset: (pair.options && pair.options.target_offset) || undefined },
+  };
+  try {
+    const r = await startGenerate(body);
+    entry.jobId = r.job;
+  } catch (err) {
+    entry.state = "error";
+    entry.error = err && err.message ? err.message : String(err);
+    if (err && err.status === undefined) {
+      entry.error = "Could not reach the helper (" + entry.error + ")";
+      refreshHelper();
+    }
+    renderPairs();
+    return;
+  }
+  pollJob(pair, entry);
+}
+
+function pollJob(pair, entry) {
+  const tick = async () => {
+    if (gen.get(pair.id) !== entry) return;
+    let job;
+    try {
+      job = await getJob(entry.jobId, entry.since);
+    } catch (err) {
+      entry.failures = (entry.failures || 0) + 1;
+      if (entry.failures > 8) {
+        entry.state = "error";
+        entry.error = "Lost contact with the helper: " + (err && err.message ? err.message : err);
+        renderPairs();
+        return;
+      }
+      setTimeout(tick, 1500);
+      return;
+    }
+    entry.failures = 0;
+    entry.since = job.log_total;
+    entry.lines.push(...(job.log || []));
+    entry.state = job.state;
+    entry.step = job.step;
+    entry.progress = job.progress;
+    entry.warnings = job.warnings || [];
+    if (job.state === "done") {
+      entry.results = (job.results || []).map((r) => ({ variant: r.variant, frames: r.frames, seconds: r.seconds, tokens: r.tokens }));
+      entry.engine = (job.results && job.results[0] && job.results[0].engine) || null;
+      renderPairs();
+      if (entry.autoView && pairs.includes(pair)) viewPair(pair, "gen", 1);
+      return;
+    }
+    if (job.state === "error") entry.error = job.error || "failed";
+    renderPairs();
+    if (job.state === "running" || job.state === "queued") setTimeout(tick, 700);
+  };
+  tick();
+}
+
+async function cancelPair(pair) {
+  const g = gen.get(pair.id);
+  if (!g || !g.jobId) return;
+  try {
+    await cancelJob(g.jobId);
+  } catch (err) {
+    console.warn("cancel failed", err);
+  }
+}
+
+async function generateAll() {
+  for (const p of pairs.slice()) {
+    const g = gen.get(p.id);
+    if (g && (g.state === "running" || g.state === "queued")) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await generatePair(p, { autoView: false });
+  }
+}
+
+// -- compare bar: start clip / generated / end clip -------------------------------------------
+function hideCompare() {
+  viewing = null;
+  if (el.compareBar) el.compareBar.hidden = true;
+}
+
+function seekFrame(frame) {
+  if (!mixer || currentDuration <= 0) return;
+  mixer.setTime(Math.min(currentDuration - 1e-5, Math.max(0, frame / DISPLAY_FPS)));
+  setPlaying(false);
+  applyRootLock();
+  syncScrub(true);
+}
+
+function showCompare(pair, which, variant) {
+  viewing = { pairId: pair.id, which, variant };
+  const g = gen.get(pair.id);
+  el.compareBar.hidden = false;
+  el.compareTitle.textContent = pairName(pair);
+  el.compareTitle.title = pairName(pair);
+  for (const [btn, key] of [[el.cmpStart, "start"], [el.cmpGen, "gen"], [el.cmpEnd, "end"]]) btn.classList.toggle("active", key === which);
+  const variants = (g && g.results) || [];
+  el.cmpVariant.hidden = variants.length < 2;
+  el.cmpVariant.innerHTML = variants.map((r) => `<option value="${r.variant}">v${r.variant}</option>`).join("");
+  el.cmpVariant.value = String(variant);
+  const mock = g && g.engine === "mock";
+  el.compareNote.classList.toggle("mock", !!mock);
+  const frames = (g && g.results && g.results.find((r) => r.variant === variant)) || {};
+  const base =
+    which === "gen"
+      ? "Generated" + (frames.frames ? ": " + frames.frames + " frames (" + frames.seconds + " s)" : "") + ". Ends match the start and end poses; the middle is the model's."
+      : which === "start"
+        ? "Start clip, paused on frame " + pair.start.frame + "."
+        : "End clip, paused on frame " + pair.end.frame + ".";
+  el.compareNote.textContent = mock ? base + " MOCK helper: a linear blend, not MotionBricks output." : base;
+}
+
+async function viewPair(pair, which, variant = 1) {
+  const g = gen.get(pair.id);
+  if (which === "gen") {
+    const vpath = virtualPathFor(pair, variant);
+    showCompare(pair, which, variant);
+    try {
+      if (!isVirtualPath(vpath)) {
+        showOverlay("loading", "Loading generated clip…", pairName(pair) + variantSuffix(variant));
+        const buf = await fetchResultBuffer(resultUrl(pairName(pair), variant, "fbx"));
+        registerVirtualFile(vpath, new Blob([buf], { type: "application/octet-stream" }));
+      }
+    } catch (err) {
+      showOverlay("error", "Could not load the generated clip", err && err.message ? err.message : String(err));
+      return;
+    }
+    loadClip(vpath, {
+      keepCompare: true,
+      hook: () => {
+        // the pose buttons record the selected clip, not this generated one
+        if (el.setStartBtn) el.setStartBtn.disabled = true;
+        if (el.setEndBtn) el.setEndBtn.disabled = true;
+      },
+    });
+    return;
+  }
+  const clip = which === "start" ? pair.start : pair.end;
+  showCompare(pair, which, variant);
+  setSelectedPath(clip.clip, false, { scrollToPath: true });
+  loadClip(clip.clip, { keepCompare: true, hook: () => seekFrame(clip.frame) });
+  void g;
+}
+
+function currentViewPair() {
+  return viewing ? pairs.find((p) => p.id === viewing.pairId) : null;
+}
+
+if (el.helperPill) el.helperPill.addEventListener("click", openHelperModal);
+if (el.helperModalClose) el.helperModalClose.addEventListener("click", () => el.helperModal.classList.add("hidden"));
+if (el.helperRecheck) el.helperRecheck.addEventListener("click", refreshHelper);
+if (el.generateAllBtn) el.generateAllBtn.addEventListener("click", generateAll);
+if (el.cmpStart) el.cmpStart.addEventListener("click", () => { const p = currentViewPair(); if (p) viewPair(p, "start", viewing.variant); });
+if (el.cmpGen) el.cmpGen.addEventListener("click", () => { const p = currentViewPair(); if (p) viewPair(p, "gen", viewing.variant); });
+if (el.cmpEnd) el.cmpEnd.addEventListener("click", () => { const p = currentViewPair(); if (p) viewPair(p, "end", viewing.variant); });
+if (el.cmpVariant) el.cmpVariant.addEventListener("change", () => { const p = currentViewPair(); if (p) viewPair(p, "gen", Number(el.cmpVariant.value) || 1); });
+if (el.cmpClose) el.cmpClose.addEventListener("click", hideCompare);
+window.__helperDebug = () => ({ helperState, gen: Object.fromEntries(gen), viewing });
+
 // --- folder open ------------------------------------------------------------
 function folderSupportNote() {
   if (supportsDirectoryPicker()) {
@@ -1743,7 +2176,7 @@ async function afterFolderIngested(label) {
   showOverlay(
     "idle",
     "Click a clip to preview it",
-    "Body is Auto (matches pack): it uses the preset character mesh when one is present (for example HumanM for Kevin Iglesias, SK_Protof-Actor for PROTOFACTOR), or the model in that pack with the closest bone names. Set Start / Set End, then Send to Inbetweener to record a pair. Save pairs.json to write the list to disk. This does not launch MotionBricks."
+    "Body is Auto (matches pack): it uses the preset character mesh when one is present (for example HumanM for Kevin Iglesias, SK_Protof-Actor for PROTOFACTOR), or the model in that pack with the closest bone names. Set Start / Set End, then Send to Inbetweener to record a pair. Save pairs.json to write the list to disk. With the local helper running (see the Helper pill), Generate runs MotionBricks on a pair."
   );
 }
 
@@ -1857,6 +2290,7 @@ async function boot() {
   await loadPresets();
   fillBodySelect();
   renderList();
+  startHelperPolling();
 }
 
 boot();
