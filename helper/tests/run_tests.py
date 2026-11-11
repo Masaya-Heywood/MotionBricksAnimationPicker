@@ -114,10 +114,13 @@ def main():
         origin = "https://masaya-heywood.github.io"
         st, hd, _ = http("OPTIONS", base + "/generate", headers={"Origin": origin, "Access-Control-Request-Method": "POST",
                                                                   "Access-Control-Request-Headers": "content-type",
-                                                                  "Access-Control-Request-Private-Network": "true"})
+                                                                  "Access-Control-Request-Private-Network": "true",
+                                                                  "Access-Control-Request-Local-Network": "true"})
         hd = {k.lower(): v for k, v in hd.items()}
-        check(st == 204 and hd.get("access-control-allow-origin") == origin and hd.get("access-control-allow-private-network") == "true",
-              "CORS + Private Network Access preflight for the Pages origin")
+        check(st == 204 and hd.get("access-control-allow-origin") == origin
+              and hd.get("access-control-allow-private-network") == "true"
+              and hd.get("access-control-allow-local-network") == "true",
+              "CORS + Private/Local Network Access preflight for the Pages origin")
         st, _, _ = http("OPTIONS", base + "/generate", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
         check(st == 403, "preflight from another origin refused")
         st, _, _ = http("POST", base + "/generate", {"x": 1}, headers={"Origin": "https://evil.example"})

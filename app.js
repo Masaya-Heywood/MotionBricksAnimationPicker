@@ -25,7 +25,9 @@ import {
   resultUrl,
   helperBaseUrl,
   SETUP_STEPS,
-} from "./helper.js";
+  LNA_STEPS,
+  queryLoopbackPermission,
+} from "./helper.js?v=20251111a";
 import {
   supportsDirectoryPicker,
   supportsSaveFilePicker,
@@ -1788,7 +1790,16 @@ window.__clipDebug = function () {
 // Optional. Everything below is inert unless the helper (helper/server.py) answers on 127.0.0.1.
 const gen = new Map(); // pairId -> { jobId, state, step, progress, lines, error, warnings, results, engine, fromDisk }
 const openLogs = new Set();
-let helperState = { online: false, ready: false, mock: false, problems: [], data: null };
+let helperState = {
+  online: false,
+  ready: false,
+  mock: false,
+  problems: [],
+  data: null,
+  error: null,
+  blocked: false,
+  permission: "unknown",
+};
 let helperTimer = null;
 let viewing = null; // { pairId, which, variant }
 
@@ -1804,7 +1815,14 @@ function updateHelperPill() {
   const pill = el.helperPill;
   if (!pill) return;
   pill.classList.remove("on", "warn", "off", "mock");
-  if (!helperState.online) {
+  if (helperState.blocked && !helperState.online) {
+    pill.classList.add("warn");
+    pill.textContent = "Helper: blocked by browser — click to allow";
+    pill.title =
+      "Chrome is blocking this page from reaching " +
+      helperBaseUrl() +
+      ". Click to allow Local network / Loopback access, then Check again.";
+  } else if (!helperState.online) {
     pill.classList.add("off");
     pill.textContent = "Helper: not running";
     pill.title = "No local helper found at " + helperBaseUrl() + ". Click for setup. The browser works without it.";
@@ -1834,23 +1852,69 @@ function updateGenerateAll() {
   el.generateAllBtn.title = helperState.ready ? "Generate every pair that is not running" : "Needs the local helper";
 }
 
-async function refreshHelper() {
+/**
+ * @param {{ fromUserGesture?: boolean }} [opts]
+ * fromUserGesture: run the health fetch in a click handler so Chrome can show the LNA prompt.
+ */
+async function refreshHelper(opts = {}) {
+  const fromUserGesture = !!opts.fromUserGesture;
   const was = helperState.online;
-  helperState = await checkHealth();
-  updateHelperPill();
-  updateGenerateAll();
-  if (helperState.online && !was) refreshExisting();
-  if (helperState.online !== was || el.helperModal.classList.contains("hidden") === false) {
-    renderPairs();
-    if (!el.helperModal.classList.contains("hidden")) fillHelperModal();
+  try {
+    let permission = "unknown";
+    try {
+      permission = await queryLoopbackPermission();
+    } catch (err) {
+      console.warn("loopback permission query failed", err);
+    }
+
+    // Chrome LNA: do not fire loopback fetch on page load while permission is still "prompt".
+    // A user gesture (pill / Check again) is required to show the allow dialog.
+    if (!fromUserGesture && (permission === "prompt" || permission === "denied")) {
+      helperState = {
+        online: false,
+        ready: false,
+        mock: false,
+        problems: [],
+        data: null,
+        error: null,
+        blocked: true,
+        permission,
+      };
+    } else {
+      helperState = await checkHealth();
+    }
+
+    updateHelperPill();
+    updateGenerateAll();
+    if (helperState.online && !was) refreshExisting();
+    const modal = el.helperModal;
+    const modalOpen = modal && !modal.classList.contains("hidden");
+    if (helperState.online !== was || modalOpen) {
+      renderPairs();
+      if (modalOpen) fillHelperModal();
+    }
+  } catch (err) {
+    console.error("refreshHelper failed", err);
+    helperState = {
+      ...helperState,
+      online: false,
+      ready: false,
+      blocked: helperState.blocked || false,
+      error: err,
+    };
+    try {
+      updateHelperPill();
+    } catch (pillErr) {
+      console.error("updateHelperPill failed", pillErr);
+    }
   }
 }
 
 function startHelperPolling() {
-  refreshHelper();
+  refreshHelper({ fromUserGesture: false }).catch((err) => console.error("initial helper check failed", err));
   clearInterval(helperTimer);
   helperTimer = setInterval(() => {
-    if (!document.hidden) refreshHelper();
+    if (!document.hidden) refreshHelper({ fromUserGesture: false }).catch((err) => console.error("helper poll failed", err));
   }, 4000);
 }
 
@@ -1880,13 +1944,19 @@ async function refreshExisting() {
 }
 
 function fillHelperModal() {
+  if (!el.helperModalBody) return;
   const d = helperState.data;
   let html = "";
-  if (!helperState.online) {
+  if (helperState.blocked && !helperState.online) {
+    html += `<p>The helper is a small program on your PC that connects this page to MotionBricks. It is optional: browsing, Set Start / End and pairs.json work without it.</p>
+      <p><strong>Blocked by the browser</strong> — Chrome will not let this public site reach <code>${escapeHtml(helperBaseUrl())}</code> until Local network / Loopback access is allowed.</p>
+      <p>${escapeHtml(LNA_STEPS)}</p>
+      <p>After allowing access, click <strong>Check again</strong>. You should also keep the helper running (${escapeHtml(SETUP_STEPS)}).</p>`;
+  } else if (!helperState.online) {
     html += `<p>The helper is a small program on your PC that connects this page to MotionBricks. It is optional: browsing, Set Start / End and pairs.json work without it.</p>
       <p><strong>Not running</strong> (nothing answered at <code>${escapeHtml(helperBaseUrl())}</code>).</p>
       <p>${escapeHtml(SETUP_STEPS)}</p>
-      <p>If it is running and this still says not running, your browser may be blocking a web page from reaching your own PC. Chrome asks for a one-time “local network” permission the first time; allow it. Also check that nothing else uses port 8770.</p>`;
+      <p>If the helper console says ready and this still says not running, Chrome may be blocking loopback access. ${escapeHtml(LNA_STEPS)} Also check that nothing else uses port 8770.</p>`;
   } else {
     html += `<p><strong>${helperState.ready ? "Connected" : "Running, but not ready"}</strong>${helperState.mock ? " (MOCK engine: linear blend, not MotionBricks)" : ""}.</p>`;
     if (helperState.problems && helperState.problems.length) {
@@ -1907,9 +1977,12 @@ function fillHelperModal() {
   el.helperModalBody.innerHTML = html;
 }
 
-function openHelperModal() {
+async function openHelperModal() {
+  // Health fetch must run inside the click gesture so Chrome can show the LNA prompt.
+  if (el.helperModal) el.helperModal.classList.remove("hidden");
   fillHelperModal();
-  el.helperModal.classList.remove("hidden");
+  await refreshHelper({ fromUserGesture: true });
+  fillHelperModal();
 }
 
 // -- generation ---------------------------------------------------------------------------------
@@ -2096,9 +2169,13 @@ function currentViewPair() {
   return viewing ? pairs.find((p) => p.id === viewing.pairId) : null;
 }
 
-if (el.helperPill) el.helperPill.addEventListener("click", openHelperModal);
-if (el.helperModalClose) el.helperModalClose.addEventListener("click", () => el.helperModal.classList.add("hidden"));
-if (el.helperRecheck) el.helperRecheck.addEventListener("click", refreshHelper);
+if (el.helperPill) el.helperPill.addEventListener("click", () => { openHelperModal().catch((err) => console.error(err)); });
+if (el.helperModalClose) el.helperModalClose.addEventListener("click", () => el.helperModal && el.helperModal.classList.add("hidden"));
+if (el.helperRecheck) {
+  el.helperRecheck.addEventListener("click", () => {
+    refreshHelper({ fromUserGesture: true }).catch((err) => console.error(err));
+  });
+}
 if (el.generateAllBtn) el.generateAllBtn.addEventListener("click", generateAll);
 if (el.cmpStart) el.cmpStart.addEventListener("click", () => { const p = currentViewPair(); if (p) viewPair(p, "start", viewing.variant); });
 if (el.cmpGen) el.cmpGen.addEventListener("click", () => { const p = currentViewPair(); if (p) viewPair(p, "gen", viewing.variant); });
@@ -2270,10 +2347,27 @@ window.__openFolderFromRecords = async function (records, rootName) {
 
 // --- boot -------------------------------------------------------------------
 async function boot() {
-  showWelcomeOverlay();
-  loadPairsFromStorage();
-  renderPairs();
-  updatePairsSaveState();
+  // Helper polling first: IndexedDB / FS-handle permission prompts must not leave the pill on "checking…".
+  try {
+    startHelperPolling();
+  } catch (err) {
+    console.error("startHelperPolling failed", err);
+  }
+
+  try {
+    showWelcomeOverlay();
+  } catch (err) {
+    console.error("showWelcomeOverlay failed", err);
+  }
+
+  try {
+    loadPairsFromStorage();
+    renderPairs();
+    updatePairsSaveState();
+  } catch (err) {
+    console.error("pairs restore (storage) failed", err);
+  }
+
   try {
     const storedPairsHandle = await loadPairsFileHandle();
     if (storedPairsHandle) {
@@ -2282,15 +2376,39 @@ async function boot() {
       updatePairsSaveState();
     }
   } catch (err) {
-    console.warn("Could not restore pairs file handle", err);
+    console.error("Could not restore pairs file handle", err);
   }
-  await refreshReopenButton();
-  showWelcomeOverlay();
-  await initNameMap();
-  await loadPresets();
-  fillBodySelect();
-  renderList();
-  startHelperPolling();
+
+  try {
+    await refreshReopenButton();
+  } catch (err) {
+    console.error("refreshReopenButton failed", err);
+  }
+
+  try {
+    showWelcomeOverlay();
+  } catch (err) {
+    console.error("showWelcomeOverlay (2) failed", err);
+  }
+
+  try {
+    await initNameMap();
+  } catch (err) {
+    console.error("initNameMap failed", err);
+  }
+
+  try {
+    await loadPresets();
+  } catch (err) {
+    console.error("loadPresets failed", err);
+  }
+
+  try {
+    fillBodySelect();
+    renderList();
+  } catch (err) {
+    console.error("fillBodySelect/renderList failed", err);
+  }
 }
 
-boot();
+boot().catch(console.error);

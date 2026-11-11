@@ -4,7 +4,7 @@
     python server.py --mock --soma-json ...  # no GPU: linear stand-in for the engine (testing)
 
 Binds 127.0.0.1 only. CORS is limited to the origins in config.json (GitHub Pages + localhost), POSTs from
-other origins are refused, Chrome's Private Network Access preflight is answered.
+other origins are refused. Chrome Private Network Access / Local Network Access preflight headers are answered.
 """
 import argparse
 import json
@@ -345,8 +345,11 @@ def make_handler(app):
                 self.send_header("Access-Control-Allow-Origin", o)
                 self.send_header("Vary", "Origin")
                 self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+            # Legacy PNA + newer LNA preflight opt-in headers (harmless if unused).
             if self.headers.get("Access-Control-Request-Private-Network", "").lower() == "true":
                 self.send_header("Access-Control-Allow-Private-Network", "true")
+            if self.headers.get("Access-Control-Request-Local-Network", "").lower() == "true":
+                self.send_header("Access-Control-Allow-Local-Network", "true")
 
         def send_json(self, code, obj):
             data = json.dumps(obj).encode("utf-8")

@@ -6,22 +6,70 @@
 export const HELPER_URL_KEY = "animlab-helper-url-v1";
 export const DEFAULT_HELPER_URL = "http://127.0.0.1:8770";
 
+const LOOPBACK_HOST_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+
 export function helperBaseUrl() {
   try {
     const v = localStorage.getItem(HELPER_URL_KEY);
-    if (v && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(v)) return v;
+    if (v && LOOPBACK_HOST_RE.test(v)) return v;
   } catch {
     /* ignore */
   }
   return DEFAULT_HELPER_URL;
 }
 
+function isLoopbackUrl(url) {
+  return LOOPBACK_HOST_RE.test(url);
+}
+
+/** Chrome LNA: public https → loopback needs targetAddressSpace (harmless where unsupported). */
+function withLoopbackAddressSpace(init = {}) {
+  if (!isLoopbackUrl(helperBaseUrl())) return { ...init };
+  return { ...init, targetAddressSpace: "loopback" };
+}
+
+/**
+ * Query Chrome's loopback Local Network Access permission.
+ * Prefer "loopback-network" (Chrome 142+); never query "local-network-access"
+ * (crashes some older Chromium builds). Guarded in try/catch.
+ * @returns {"granted"|"prompt"|"denied"|"unknown"}
+ */
+export async function queryLoopbackPermission() {
+  if (!navigator.permissions || typeof navigator.permissions.query !== "function") {
+    return "unknown";
+  }
+  for (const name of ["loopback-network", "local-network"]) {
+    try {
+      const status = await navigator.permissions.query({ name });
+      if (status && typeof status.state === "string") return status.state;
+    } catch {
+      /* unrecognized PermissionName */
+    }
+  }
+  return "unknown";
+}
+
 async function req(path, init = {}, timeoutMs = 4000) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const started = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
   try {
-    const res = await fetch(helperBaseUrl() + path, { ...init, signal: ctl.signal, cache: "no-store" });
+    const res = await fetch(helperBaseUrl() + path, {
+      ...withLoopbackAddressSpace(init),
+      signal: ctl.signal,
+      cache: "no-store",
+    });
     return res;
+  } catch (err) {
+    const elapsed = (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now()) - started;
+    if (err && err.name === "AbortError") {
+      err.helperKind = "timeout";
+      err.helperElapsedMs = elapsed;
+    } else {
+      err.helperKind = "network";
+      err.helperElapsedMs = elapsed;
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -43,13 +91,43 @@ async function json(res) {
   return data;
 }
 
-/** -> { online, ready, mock, problems, data, error } */
+/**
+ * -> { online, ready, mock, problems, data, error, blocked, permission }
+ * blocked: browser LNA/CORS likely preventing loopback access (not "helper not running").
+ */
 export async function checkHealth() {
+  let permission = "unknown";
+  try {
+    permission = await queryLoopbackPermission();
+  } catch {
+    permission = "unknown";
+  }
   try {
     const data = await json(await req("/health"));
-    return { online: true, ready: !!data.ready, mock: !!data.mock, problems: data.problems || [], data, error: null };
+    return {
+      online: true,
+      ready: !!data.ready,
+      mock: !!data.mock,
+      problems: data.problems || [],
+      data,
+      error: null,
+      blocked: false,
+      permission,
+    };
   } catch (err) {
-    return { online: false, ready: false, mock: false, problems: [], data: null, error: err };
+    // Offline + Permissions API prompt/denied ⇒ treat as browser LNA block (not "helper down").
+    // A stopped helper also yields TypeError; only label blocked when permission says so.
+    const blocked = permission === "prompt" || permission === "denied";
+    return {
+      online: false,
+      ready: false,
+      mock: false,
+      problems: [],
+      data: null,
+      error: err,
+      blocked,
+      permission,
+    };
   }
 }
 
@@ -120,3 +198,8 @@ export function resultUrl(name, variant, ext) {
 export const SETUP_STEPS =
   "Double-click helper\\Start-Helper.bat (or run it from PowerShell). It opens a console window that must stay open. " +
   "When it prints \u201cready\u201d, this page connects by itself.";
+
+export const LNA_STEPS =
+  "Chrome (141+) blocks public sites from talking to programs on your PC until you allow Local network / Loopback access. " +
+  "Click the Helper pill or Check again so Chrome can show the permission prompt. " +
+  "If nothing appears: site settings (lock icon) \u2192 Local network access / Loopback network \u2192 Allow, then reload.";
