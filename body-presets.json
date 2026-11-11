@@ -1,0 +1,17 @@
+{
+  "comment": "Auto body matching for the clip browser. packPattern is a case-insensitive regex tested against the relative path and the top-level pack folder. bodyNames are preferred mesh filenames (with or without .fbx). When no preset matches, Auto picks the mesh model in the same top-level pack folder with the best bone-name overlap. You can edit this file in a fork, or leave it as a starting point for Kevin Iglesias and PROTOFACTOR packs.",
+  "presets": [
+    {
+      "id": "kevin-iglesias",
+      "packName": "Kevin Iglesias",
+      "packPattern": "kevin|iglesias",
+      "bodyNames": ["HumanM_Model.fbx"]
+    },
+    {
+      "id": "protofactor",
+      "packName": "PROTOFACTOR",
+      "packPattern": "protofactor",
+      "bodyNames": ["SK_Protof-Actor.fbx", "SK_Protof-Actress.fbx"]
+    }
+  ]
+}

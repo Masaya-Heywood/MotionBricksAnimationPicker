@@ -1,0 +1,5 @@
+three.js r180 (0.180.0), MIT License — see LICENSE-three.js
+  three.module.min.js + three.core.min.js
+  FBXLoader (local patch for FBX 7.3 / Kevin Iglesias AnimationCurveNode parents)
+  OrbitControls, GLTFLoader, BufferGeometryUtils, NURBSCurve/NURBSUtils
+fflate (vendor/addons/libs/fflate.module.js) is MIT-licensed (© 2020 Arjun Barrett and contributors)

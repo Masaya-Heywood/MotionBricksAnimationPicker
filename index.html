@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AnimLab Clip Browser</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23e0a14a'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three.module.min.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>AnimLab <span>Clip Browser</span></h1>
+      <button id="open-folder-btn" type="button">Open folder</button>
+      <button id="reopen-folder-btn" type="button" hidden>Reopen last folder</button>
+      <div id="root-path" title="">No folder open</div>
+      <label id="body-label">Body
+        <select id="body-select" title="Character mesh used to play clips. Auto picks the model that matches the pack.">
+          <option value="auto">Auto (matches pack)</option>
+          <option value="">Skeleton only</option>
+        </select>
+      </label>
+      <div id="clip-count"></div>
+    </header>
+
+    <aside id="sidebar">
+      <div id="search-row">
+        <input id="search" type="search" placeholder="Search by name or folder…" autocomplete="off" />
+        <label id="starred-only"><input type="checkbox" id="starred-toggle" /> Starred</label>
+      </div>
+      <div id="clip-list" tabindex="0"></div>
+      <div id="pairs-panel">
+        <div id="pairs-head">
+          <strong>Inbetweener pairs</strong>
+          <span id="pairs-count">0</span>
+        </div>
+        <div id="pair-staging">
+          <div id="start-readout" class="pose-readout">Start: not set</div>
+          <div id="end-readout" class="pose-readout">End: not set</div>
+        </div>
+        <div id="pairs-actions">
+          <button id="save-pairs-btn" type="button">Save pairs.json</button>
+          <button id="load-pairs-btn" type="button">Open pairs.json</button>
+        </div>
+        <div id="pairs-list"></div>
+      </div>
+    </aside>
+
+    <div id="viewport-wrap">
+      <canvas id="viewport"></canvas>
+      <div id="overlay" class="loading">
+        <div class="msg">
+          <h2>Open an animation folder</h2>
+          <p>Your FBX files stay on this computer. Nothing is uploaded.</p>
+          <div id="overlay-actions"></div>
+        </div>
+      </div>
+      <div id="hud" hidden></div>
+      <details id="details-panel" hidden>
+        <summary>Details</summary>
+        <div id="details-status"></div>
+        <div id="track-debug-mode"></div>
+        <ul id="track-debug-list"></ul>
+        <button id="name-map-btn" type="button">Name map</button>
+      </details>
+    </div>
+
+    <footer id="controls">
+      <div id="transport">
+        <div id="transport-row">
+          <button id="play-btn" class="primary" disabled>Play</button>
+          <label class="slider">
+            Speed
+            <input id="speed" type="range" min="0.1" max="2" step="0.05" value="1" disabled />
+            <span id="speed-readout">1.00×</span>
+          </label>
+          <label class="slider">
+            Frame
+            <input id="scrub" type="range" min="0" max="0" step="1" value="0" disabled />
+            <span id="frame-readout">—</span>
+          </label>
+          <select id="clip-select" hidden></select>
+        </div>
+        <div id="flags-row">
+          <button id="lock-root-btn" disabled>Lock root motion</button>
+          <button id="grid-btn" class="active-flag">Ground grid</button>
+          <button id="bones-btn" class="active-flag">Bones</button>
+          <button id="reset-cam-btn" disabled>Reset camera</button>
+          <button id="set-start-btn" disabled>Set Start</button>
+          <button id="set-end-btn" disabled>Set End</button>
+          <button id="send-pair-btn" disabled>Send to Inbetweener</button>
+          <label class="slider" id="variants-label">Variants
+            <input id="variants" type="number" min="1" max="32" value="1" />
+          </label>
+          <span id="clip-meta"></span>
+        </div>
+      </div>
+      <div id="meta-col">
+        <div id="clip-title" class="empty">No clip selected</div>
+        <textarea id="note" placeholder="Note for this clip (saved with the star)…" disabled></textarea>
+        <div id="meta-actions">
+          <button id="star-btn" disabled>☆ Star</button>
+          <button id="export-btn">Export starred CSV</button>
+        </div>
+      </div>
+    </footer>
+  </div>
+  <div id="name-map-modal" class="modal hidden" role="dialog" aria-labelledby="name-map-title">
+    <div class="modal-card">
+      <h2 id="name-map-title">Bone name map</h2>
+      <p>Used when playing a clip on the preview body. Names are matched after stripping prefixes like <code>mixamorig:</code>, <code>B-</code>, <code>Bip01 </code>, and <code>humanoid_</code>. Edit the JSON and click Save — it stays in this browser.</p>
+      <textarea id="name-map-editor" spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button id="name-map-reset" type="button">Reset to default</button>
+        <span style="flex:1"></span>
+        <button id="name-map-cancel" type="button">Cancel</button>
+        <button id="name-map-save" type="button" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+  <input id="folder-input" type="file" webkitdirectory multiple hidden />
+  <input id="pairs-input" type="file" accept="application/json,.json" hidden />
+  <script type="module" src="app.js"></script>
+</body>
+</html>
