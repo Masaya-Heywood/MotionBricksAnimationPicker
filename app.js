@@ -12,7 +12,7 @@ import {
   bindClipExact,
   retargetClipRestRelative,
 } from "./retarget.js";
-import { createTreeList } from "./tree.js";
+import { createTreeList } from "./tree.js?v=20261111b";
 import {
   checkHealth,
   startGenerate,

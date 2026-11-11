@@ -154,6 +154,35 @@ function collectFolderKeys(node, out = []) {
   return out;
 }
 
+/** True if clipPath sits under a hidden folder key (any ancestor path prefix). */
+export function isUnderHiddenFolder(clipPath, hidden) {
+  if (!hidden || !hidden.size) return false;
+  const parts = String(clipPath || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter(Boolean);
+  if (parts.length < 2) return false;
+  parts.pop();
+  let acc = [];
+  for (const part of parts) {
+    acc.push(part);
+    if (hidden.has(acc.join("/"))) return true;
+  }
+  return false;
+}
+
+function folderKeyIsHidden(key, hidden) {
+  if (!key || !hidden || !hidden.size) return false;
+  if (hidden.has(key)) return true;
+  const parts = String(key).split("/").filter(Boolean);
+  let acc = [];
+  for (const part of parts) {
+    acc.push(part);
+    if (hidden.has(acc.join("/"))) return true;
+  }
+  return false;
+}
+
 export function flattenVisibleRows(root, options = {}) {
   const expanded = options.expanded || new Set();
   const hidden = options.hidden || new Set();
@@ -161,7 +190,7 @@ export function flattenVisibleRows(root, options = {}) {
   const rows = [];
 
   function walkFolder(folder, depth, parentHidden) {
-    const hid = parentHidden || hidden.has(folder.key);
+    const hid = parentHidden || folderKeyIsHidden(folder.key, hidden);
     if (hid && !showHidden) return;
     rows.push({
       type: "folder",
@@ -267,15 +296,22 @@ export function createTreeList(opts) {
     return ((opts.getQuery && opts.getQuery()) || "").trim();
   }
 
-  function filterClips(all) {
+  function matchesQuery(c, q) {
+    if (!q) return true;
+    return (c.path + " " + c.name + " " + (c.folder || "") + " " + (c.pack || ""))
+      .toLowerCase()
+      .includes(q);
+  }
+
+  function filterClips(all, { ignoreHidden = false } = {}) {
     const q = currentQuery().toLowerCase();
     const starredOnly = !!(opts.getStarredOnly && opts.getStarredOnly());
     return all.filter((c) => {
       if (starredOnly && opts.isStarred && !opts.isStarred(c.path)) return false;
-      if (!q) return true;
-      return (c.path + " " + c.name + " " + (c.folder || "") + " " + (c.pack || ""))
-        .toLowerCase()
-        .includes(q);
+      if (!matchesQuery(c, q)) return false;
+      // Search must not surface clips under hidden folders (incl. collapsed ancestors).
+      if (!ignoreHidden && q && !showHidden && isUnderHiddenFolder(c.path, hidden)) return false;
+      return true;
     });
   }
 
@@ -354,8 +390,16 @@ export function createTreeList(opts) {
 
   function render(flags = {}) {
     const all = (opts.getClips && opts.getClips()) || [];
-    const filtered = filterClips(all);
     const q = currentQuery();
+    // Keep hidden set in sync before search filtering (ensureState also needs the tree).
+    const id = rootId();
+    if (id !== lastRootId) hidden = loadHidden(id);
+
+    const matched = filterClips(all, { ignoreHidden: true });
+    const filtered = filterClips(all);
+    const hiddenBlockedSearch =
+      !!q && !showHidden && matched.length > 0 && filtered.length === 0 && hidden.size > 0;
+
     tree = buildFolderTree(filtered);
     ensureState(tree);
 
@@ -387,7 +431,11 @@ export function createTreeList(opts) {
       return visibleClips;
     }
     if (!filtered.length) {
-      container.innerHTML = `<div class="empty-list">No clips match this search.</div>`;
+      container.innerHTML = `<div class="empty-list">${
+        hiddenBlockedSearch
+          ? "All matching folders are hidden. Turn on “Show hidden” to see them."
+          : "No clips match this search."
+      }</div>`;
       return visibleClips;
     }
     if (!rows.length) {
