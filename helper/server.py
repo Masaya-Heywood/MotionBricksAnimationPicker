@@ -25,6 +25,7 @@ sys.path.insert(0, HERE)
 
 from mbh import __version__  # noqa: E402
 from pipeline import Job, Pipeline, default_pair_name, safe_name, variant_suffix  # noqa: E402
+from request_schema import normalize_request  # noqa: E402
 
 LOCALHOST_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
 
@@ -278,38 +279,12 @@ class App(object):
 
 
 def validate_request(app, body):
-    if not isinstance(body, dict):
-        raise ValueError("Body must be a JSON object")
-    for k in ("start", "end"):
-        p = body.get(k)
-        if not isinstance(p, dict) or not isinstance(p.get("clip"), str) or not p["clip"].lower().endswith(".fbx"):
-            raise ValueError("%s needs {clip: 'relative/path.fbx', frame: n}" % k)
-        try:
-            p["frame"] = int(p.get("frame", 0))
-        except (TypeError, ValueError):
-            raise ValueError("%s.frame must be an integer" % k)
-        if p["frame"] < 0 or p["frame"] > 100000:
-            raise ValueError("%s.frame out of range" % k)
-        if ".." in p["clip"].replace("\\", "/").split("/"):
-            raise ValueError("%s.clip must not contain '..'" % k)
     defaults = app.cfg.get("defaults", {})
-    opts = dict(defaults)
-    opts.update(body.get("options") or {})
-    to = dict(defaults.get("target_offset") or {})
-    to.update((body.get("options") or {}).get("target_offset") or {})
-    opts["target_offset"] = {k: float(to.get(k, 0.0)) for k in ("forward", "right", "turn_deg")}
-    opts["poses_to_use"] = max(1, min(4, int(opts.get("poses_to_use", 4))))
-    if opts.get("tokens") not in (None, ""):
-        t = int(opts["tokens"])
-        if not 6 <= t <= 16:
-            raise ValueError("options.tokens must be 6..16")
-        opts["tokens"] = t
-    else:
-        opts["tokens"] = None
-    variants = max(1, min(32, int(body.get("variants", defaults.get("variants", 1)))))
-    name = safe_name(body.get("name") or default_pair_name(body["start"], body["end"]))
-    return {"name": name, "start": body["start"], "end": body["end"], "variants": variants, "options": opts,
-            "pair_id": str(body.get("id", ""))[:80]}
+
+    def name_fn(raw_name, start, end):
+        return safe_name(raw_name or default_pair_name(start, end))
+
+    return normalize_request(body, defaults=defaults, name_fn=name_fn)
 
 
 # -- HTTP ---------------------------------------------------------------------------------------
@@ -456,9 +431,14 @@ def make_handler(app):
                 req = validate_request(app, body)
                 # fail fast on missing clips so the page gets a clear message
                 pl = app.pipeline or Pipeline(app.cfg, None, app.soma_json)
-                for k in ("start", "end"):
+                clips = [req["start"]["clip"]] + [t["clip"] for t in req.get("targets") or [req["end"]]]
+                seen = set()
+                for clip in clips:
+                    if clip in seen:
+                        continue
+                    seen.add(clip)
                     try:
-                        pl.resolve_source(req[k]["clip"])
+                        pl.resolve_source(clip)
                     except FileNotFoundError as err:
                         return self.send_json(404, {"error": str(err)})
                 job = app.submit(req)

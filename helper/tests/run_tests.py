@@ -86,6 +86,8 @@ def main():
     print("\n== unit tests")
     r = subprocess.run([sys.executable, os.path.join(HERE, "test_units.py")], env=env)
     check(r.returncode == 0, "test_units.py")
+    r = subprocess.run([sys.executable, os.path.join(HERE, "test_request.py")], env=env)
+    check(r.returncode == 0, "test_request.py (schema + chaining helpers)")
 
     print("\n== fixtures")
     root = os.path.join(tmp, "AnimationLab")
@@ -134,9 +136,35 @@ def main():
 
         body = {"id": "t1", "start": {"clip": "Synth/Animations/Synth@WalkA.fbx", "frame": 12},
                 "end": {"clip": "Synth/Animations/Synth@Reach.fbx", "frame": 20}, "variants": 2,
-                "options": {"target_offset": {"forward": 0.25, "turn_deg": 20}}}
+                "options": {"target_offset": {"forward": 0.25, "turn_deg": 20},
+                            "tokens_min": 8, "tokens_max": 14, "poses_to_use": 4, "transition_early": 0}}
         st, _, j = http("POST", base + "/generate", body, headers={"Origin": origin})
         check(st == 202, "job accepted: %s" % j)
+        # Multi-target request must validate (and will run if fixtures resolve)
+        multi = {"id": "t-multi", "name": "multi_chain_test",
+                 "start": {"clip": "Synth/Animations/Synth@WalkA.fbx", "frame": 8},
+                 "targets": [
+                     {"clip": "Synth/Animations/Synth@Reach.fbx", "frame": 15,
+                      "seconds": 1.0, "tokens_min": 8, "tokens_max": 10, "poses_to_use": 3,
+                      "transition_early": 2, "target_offset": {"forward": 0.4, "right": 0, "turn_deg": 0}},
+                     {"clip": "Synth/Animations/Synth@WalkA.fbx", "frame": 20,
+                      "seconds": 0.8, "tokens_min": 8, "tokens_max": 8, "poses_to_use": 2,
+                      "transition_early": 0, "target_offset": {"forward": 0.2, "right": 0, "turn_deg": 10}},
+                 ], "variants": 1}
+        st, _, jm = http("POST", base + "/generate", multi, headers={"Origin": origin})
+        check(st == 202, "multi-target job accepted: %s" % jm)
+        job_m = None
+        for _ in range(240):
+            _, _, job_m = http("GET", base + "/jobs/" + jm["job"])
+            if job_m["state"] in ("done", "error", "cancelled"):
+                break
+            time.sleep(0.5)
+        check(job_m and job_m["state"] == "done", "multi-target job finished: %s %s" % (
+            job_m and job_m["state"], job_m and job_m.get("error")))
+        if job_m and job_m["state"] == "done":
+            check(len(job_m["results"]) == 1 and job_m["results"][0].get("n_targets") == 2,
+                  "multi-target result reports n_targets=2")
+            check(job_m["results"][0]["frames"] > 20, "chained output has concatenated frames")
         job = None
         for _ in range(240):
             _, _, job = http("GET", base + "/jobs/" + j["job"])

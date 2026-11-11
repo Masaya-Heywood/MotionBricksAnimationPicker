@@ -15,6 +15,11 @@
   "blender_timeout_seconds": 240,
   "defaults": {
     "poses_to_use": 4,
+    "transition_early": 0,
+    "tokens_min": 8,
+    "tokens_max": 14,
+    "seconds": 1.0,
+    "auto_distance": false,
     "target_offset": { "forward": 0.0, "right": 0.0, "turn_deg": 0.0 },
     "tokens": null,
     "include_mesh": false,

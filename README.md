@@ -65,15 +65,29 @@ Do not add paid or licensed FBX files to this repository. Keep those packs on yo
 ```json
 {
   "version": 1,
-  "note": "Input for a future MotionBricks / SOMA batch script. clip paths are relative to the FBX root. frame is an integer at 30 fps display time. name (optional) is the output name the local helper uses for the generated BVH/FBX; options.target_offset (optional) places the end pose {forward, right (m), turn_deg}. Saving this file does not launch anything; use Generate with the local helper running.",
+  "note": "…",
   "pairs": [
     {
       "id": "<uuid>",
       "start": { "clip": "relative/path/to/clip.fbx", "frame": 30 },
       "end":   { "clip": "relative/path/to/other.fbx", "frame": 0 },
+      "targets": [
+        {
+          "clip": "relative/path/to/other.fbx",
+          "frame": 0,
+          "seconds": 1.0,
+          "speed_mps": 1.5,
+          "auto_distance": true,
+          "target_offset": { "forward": 1.5, "right": 0.0, "turn_deg": 0.0 },
+          "poses_to_use": 4,
+          "transition_early": 0,
+          "tokens_min": 8,
+          "tokens_max": 14
+        }
+      ],
       "variants": 1,
-      "name": "optional output name, e.g. CombatIdle1H01_f10__Attack1H01_R_f12_35cf68",
-      "options": { "target_offset": { "forward": 0.0, "right": 0.0, "turn_deg": 0.0 } },
+      "name": "optional output name",
+      "options": { "target_offset": { "forward": 1.5, "right": 0.0, "turn_deg": 0.0 } },
       "note": "optional text",
       "created": "2026-11-10T21:00:00Z"
     }
@@ -81,7 +95,7 @@ Do not add paid or licensed FBX files to this repository. Keep those packs on yo
 }
 ```
 
-Clip paths are relative to the folder you opened. Frame numbers use the 30 fps display rate shown in the scrubber.
+Clip paths are relative to the folder you opened. Frame numbers use the 30 fps display rate shown in the scrubber. Legacy pairs with only `end` + `options.target_offset` still load; the page upgrades them to `targets[]`. `seconds` is the time from the previous keypose (used with clip root speed for Auto distance). `tokens_min`/`tokens_max` map to MotionBricks `allowed_token_counts` (raw frames readout = 4×tokens). Multiple targets chain like the Inbetweener (each segment’s context is the previous result’s end).
 
 ## Notes and limits
 

@@ -128,4 +128,14 @@ if __name__ == "__main__":
     else:
         test_bvh_roundtrip(soma)
         test_retarget_roundtrip(soma)
+    print("\n== request schema / chaining")
+    import test_request
+    test_request.test_raw_frames_readout()
+    test_request.test_played_frame_count()
+    test_request.test_variant_tokens_range()
+    test_request.test_normalize_legacy_single_target()
+    test_request.test_normalize_multi_target()
+    test_request.test_normalize_rejects_bad_tokens()
+    test_request.test_concat_segments()
+    test_request.test_default_target_helpers()
     print("ALL OK")

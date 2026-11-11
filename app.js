@@ -12,7 +12,7 @@ import {
   bindClipExact,
   retargetClipRestRelative,
 } from "./retarget.js";
-import { createTreeList } from "./tree.js?v=20261111b";
+import { createTreeList } from "./tree.js?v=20261111c";
 import {
   checkHealth,
   startGenerate,
@@ -27,7 +27,7 @@ import {
   SETUP_STEPS,
   LNA_STEPS,
   queryLoopbackPermission,
-} from "./helper.js?v=20251111a";
+} from "./helper.js?v=20261111c";
 import {
   supportsDirectoryPicker,
   supportsSaveFilePicker,
@@ -125,9 +125,20 @@ const el = {
   helperRecheck: $("helper-recheck"),
   helperModalClose: $("helper-modal-close"),
   generateAllBtn: $("generate-all-btn"),
+  optSeconds: $("opt-seconds"),
+  optAutoDistance: $("opt-auto-distance"),
   optForward: $("opt-forward"),
   optRight: $("opt-right"),
   optTurn: $("opt-turn"),
+  optPoses: $("opt-poses"),
+  optEarly: $("opt-early"),
+  optTokensMin: $("opt-tokens-min"),
+  optTokensMax: $("opt-tokens-max"),
+  optRawFrames: $("opt-raw-frames"),
+  optSpeed: $("opt-speed"),
+  footContactsToggle: $("foot-contacts-toggle"),
+  footContactThreshold: $("foot-contact-threshold"),
+  footThresholdReadout: $("foot-threshold-readout"),
   compareBar: $("compare-bar"),
   compareTitle: $("compare-title"),
   compareNote: $("compare-note"),
@@ -180,6 +191,13 @@ let pairs = [];
 let pairsPath = "";
 let pairsHandle = null;
 let pairsDirty = false;
+let selectedPairId = null;
+let selectedTargetIndex = 0;
+const clipSpeedCache = new Map(); // path -> m/s
+let showFootContacts = false;
+let footContactThreshold = 0.5;
+let footContactGroup = null;
+let footContactTrail = [];
 let currentPack = "";
 let previewLoad = null;
 let fbxChain = Promise.resolve();
@@ -240,6 +258,7 @@ function tick() {
     applyRootLock();
     syncScrub(true);
   }
+  if (showFootContacts && model) updateFootContactMarkers();
   orbit.update();
   renderer.render(scene, camera);
 }
@@ -482,6 +501,7 @@ function disposeCurrent() {
     disposeObject(model);
   }
   model = null;
+  clearFootContactMarkers();
 }
 
 
@@ -1081,6 +1101,7 @@ function presentClipObject(object, path, fallbackNote) {
       }
       updateHud(clipInfo ? clipInfo.name : path);
       updateTrackDebug(mapInfo, true);
+      cacheSpeedForSelectedClip();
       return;
     }
   }
@@ -1141,6 +1162,7 @@ function presentClipObject(object, path, fallbackNote) {
   }
   updateHud(clipInfo ? clipInfo.name : path);
   updateTrackDebug(mapInfo, false);
+  cacheSpeedForSelectedClip();
 }
 
 function loadClip(path, opts = {}) {
@@ -1270,26 +1292,90 @@ function setPose(which) {
   if (!selectedPath) return;
   const pose = { clip: selectedPath, frame: currentFrameNumber() };
   if (which === "start") startPose = pose;
-  else endPose = pose;
+  else {
+    endPose = pose;
+    const spd = clipSpeedCache.get(selectedPath);
+    if (spd != null && spd > SPEED_LOCOMOTION_EPS && el.optAutoDistance) {
+      el.optAutoDistance.checked = true;
+    }
+    applyAutoDistanceToStaging();
+    updateStagingReadouts();
+  }
   updatePoseReadouts();
+}
+
+function shortPose(pose) {
+  if (!pose || !pose.clip) return "?";
+  return pose.clip.split("/").pop() + " f" + pose.frame;
+}
+
+function renderTargetEditor(p) {
+  const targets = p.targets || [];
+  const selected = String(p.id) === String(selectedPairId);
+  if (!selected) {
+    const n = targets.length || 1;
+    return `<div class="pair-note">${n} target${n === 1 ? "" : "s"}</div>`;
+  }
+  const ti = Math.max(0, Math.min(targets.length - 1, selectedTargetIndex));
+  const chips =
+    `<button type="button" class="target-chip" data-select-start="${escapeHtml(p.id)}" disabled title="Start context">Start</button>` +
+    targets
+      .map((t, i) => {
+        const label = "Target " + (i + 1);
+        const active = i === ti ? " active" : "";
+        return `<button type="button" class="target-chip${active}" data-select-target="${escapeHtml(p.id)}" data-target-index="${i}">${label}</button>`;
+      })
+      .join("") +
+    `<span class="target-ops">
+      <button type="button" data-add-target="${escapeHtml(p.id)}" title="Add target from current End pose">+</button>
+      <button type="button" data-remove-target="${escapeHtml(p.id)}" title="Remove selected target" ${targets.length <= 1 ? "disabled" : ""}>−</button>
+    </span>`;
+  const t = targets[ti] || {};
+  const to = t.target_offset || { forward: 0, right: 0, turn_deg: 0 };
+  const spd =
+    t.speed_mps != null
+      ? Number(t.speed_mps)
+      : clipSpeedCache.has(t.clip)
+        ? clipSpeedCache.get(t.clip)
+        : null;
+  const props = `<div class="pair-target-props" data-edit-pair="${escapeHtml(p.id)}" data-edit-index="${ti}">
+    <span>${escapeHtml(shortPose(t))}</span>
+    <label>sec <input type="number" data-field="seconds" min="0.05" max="30" step="0.05" value="${Number(t.seconds) || 1}" /></label>
+    <label class="check"><input type="checkbox" data-field="auto_distance" ${t.auto_distance ? "checked" : ""} /> Auto distance</label>
+    <label>fwd <input type="number" data-field="forward" step="0.05" value="${Number(to.forward) || 0}" /></label>
+    <label>right <input type="number" data-field="right" step="0.05" value="${Number(to.right) || 0}" /></label>
+    <label>turn <input type="number" data-field="turn_deg" step="5" value="${Number(to.turn_deg) || 0}" />°</label>
+    <label>poses <input type="number" data-field="poses_to_use" min="1" max="4" step="1" value="${Number(t.poses_to_use) || 4}" /></label>
+    <label>early <input type="number" data-field="transition_early" min="0" max="200" step="1" value="${Number(t.transition_early) || 0}" /></label>
+    <label>tok <input type="number" data-field="tokens_min" min="6" max="16" step="1" value="${Number(t.tokens_min) || 8}" />–<input type="number" data-field="tokens_max" min="6" max="16" step="1" value="${Number(t.tokens_max) || 14}" /></label>
+    <span class="opt-readout">${escapeHtml(rawFramesLabel(t.tokens_min, t.tokens_max))}</span>
+    <span class="opt-readout">${spd != null && Number.isFinite(spd) ? "Speed: " + spd.toFixed(3) + " m/s" : "Speed: —"}</span>
+  </div>`;
+  return `<div class="pair-targets">${chips}</div>${props}`;
 }
 
 function renderPairs() {
   if (!el.pairsList) return;
   if (el.pairsCount) el.pairsCount.textContent = String(pairs.length);
   updateGenerateAll();
+  updateStagingReadouts();
   if (!pairs.length) {
     el.pairsList.innerHTML =
-      '<div class="empty-list" style="padding:8px 12px">No pairs yet. Set a start and end frame, then Send to Inbetweener. With the local helper running you can Generate the in-between right here.</div>';
+      '<div class="empty-list" style="padding:8px 12px">No pairs yet. Set a start and end frame, then Send to Inbetweener. With the local helper running you can Generate the in-between right here. Use + on a selected pair to chain more targets.</div>';
     return;
   }
   el.pairsList.innerHTML = pairs
     .map((p) => {
-      const s = (p.start && p.start.clip ? p.start.clip.split("/").pop() : "?") + " f" + (p.start && p.start.frame);
-      const e = (p.end && p.end.clip ? p.end.clip.split("/").pop() : "?") + " f" + (p.end && p.end.frame);
-      const note = p.note ? `<div class="pair-note">${escapeHtml(p.note)}</div>` : "";
-      const id = escapeHtml(p.id || "");
-      const g = gen.get(p.id);
+      const np = normalizePair(p);
+      const s = shortPose(np.start);
+      const targets = np.targets || [];
+      const e =
+        targets.length > 1
+          ? targets.length + " targets → " + shortPose(targets[targets.length - 1])
+          : shortPose(np.end || targets[0]);
+      const note = np.note ? `<div class="pair-note">${escapeHtml(np.note)}</div>` : "";
+      const id = escapeHtml(np.id || "");
+      const g = gen.get(np.id);
       const running = g && (g.state === "running" || g.state === "queued");
       const hasResults = g && g.results && g.results.length && g.state !== "running";
       const genTitle = helperState.ready
@@ -1303,12 +1389,14 @@ function renderPairs() {
           : `<button type="button" data-generate-pair="${id}" title="${escapeHtml(genTitle)}"${helperState.ready ? "" : " disabled"}>Generate</button>`) +
         (hasResults ? `<button type="button" class="view-gen" data-view-pair="${id}">View</button>` : "") +
         `<button type="button" data-delete-pair="${id}">Delete</button>`;
-      return `<div class="pair-item" data-pair-id="${id}">
+      const sel = String(np.id) === String(selectedPairId) ? " selected" : "";
+      return `<div class="pair-item${sel}" data-pair-id="${id}">
         <div class="pair-top">
-          <div class="pair-body">${escapeHtml(s)} → ${escapeHtml(e)} · ${p.variants || 1} var${note}</div>
+          <div class="pair-body" data-select-pair="${id}">${escapeHtml(s)} → ${escapeHtml(e)} · ${np.variants || 1} var${note}</div>
           <div class="pair-buttons">${buttons}</div>
         </div>
-        ${renderGenStatus(p, g)}
+        ${renderTargetEditor(np)}
+        ${renderGenStatus(np, g)}
       </div>`;
     })
     .join("");
@@ -1364,7 +1452,7 @@ function loadPairsFromStorage() {
       return;
     }
     const doc = normalizePairsDoc(JSON.parse(raw));
-    pairs = doc.pairs || [];
+    pairs = (doc.pairs || []).map(normalizePair);
   } catch {
     pairs = [];
   }
@@ -1372,18 +1460,20 @@ function loadPairsFromStorage() {
 
 async function sendPair() {
   if (!startPose || !endPose) return;
-  const item = {
+  const target = makeTargetFromPose(endPose);
+  const item = normalizePair({
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2),
     start: { clip: startPose.clip, frame: startPose.frame },
     end: { clip: endPose.clip, frame: endPose.frame },
+    targets: [target],
     variants: Math.max(1, Math.min(32, Number(el.variants && el.variants.value) || 1)),
     note: String((el.note && el.note.value) || "").slice(0, 2000),
     created: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-  };
+  });
   item.name = pairName(item);
-  const offset = currentTargetOffset();
-  if (offset) item.options = { target_offset: offset };
   pairs.push(item);
+  selectedPairId = item.id;
+  selectedTargetIndex = 0;
   markPairsDirty();
   renderPairs();
   let wrote = false;
@@ -1484,7 +1574,7 @@ async function openPairsFromDisk() {
         multiple: false,
       });
       const doc = await readPairsFromHandle(handle);
-      pairs = doc.pairs || [];
+      pairs = (doc.pairs || []).map(normalizePair);
       pairsHandle = handle;
       pairsPath = handle.name || "pairs.json";
       pairsDirty = false;
@@ -1509,7 +1599,7 @@ async function onPairsFileInputChange(ev) {
   if (!file) return;
   try {
     const doc = normalizePairsDoc(JSON.parse(await file.text()));
-    pairs = doc.pairs || [];
+    pairs = (doc.pairs || []).map(normalizePair);
     pairsHandle = null;
     pairsPath = file.name || "pairs.json";
     pairsDirty = false;
@@ -1573,6 +1663,7 @@ el.scrub.addEventListener("input", () => {
   mixer.setTime(t);
   applyRootLock();
   syncScrub(false);
+  if (showFootContacts) updateFootContactMarkers();
 });
 el.scrub.addEventListener("pointerup", () => {
   isScrubbing = false;
@@ -1633,6 +1724,101 @@ if (el.pairsList) {
     if (cp) return void cancelPair(cp);
     const vp = find("data-view-pair");
     if (vp) return void viewPair(vp, "gen", 1);
+
+    const selPair = e.target.closest("[data-select-pair]");
+    if (selPair) {
+      selectedPairId = selPair.getAttribute("data-select-pair");
+      selectedTargetIndex = 0;
+      renderPairs();
+      return;
+    }
+    const chip = e.target.closest("[data-select-target]");
+    if (chip) {
+      selectedPairId = chip.getAttribute("data-select-target");
+      selectedTargetIndex = Number(chip.getAttribute("data-target-index")) || 0;
+      renderPairs();
+      return;
+    }
+    const addBtn = e.target.closest("[data-add-target]");
+    if (addBtn) {
+      const pair = pairs.find((p) => String(p.id) === addBtn.getAttribute("data-add-target"));
+      if (!pair) return;
+      if (!endPose) {
+        showOverlay("idle", "Set an End pose first", "Set End on a clip, then click + to append it as the next target.");
+        setTimeout(() => {
+          if (el.overlay.querySelector("h2")?.textContent === "Set an End pose first") hideOverlay();
+        }, 3500);
+        return;
+      }
+      const np = normalizePair(pair);
+      np.targets.push(makeTargetFromPose(endPose));
+      Object.assign(pair, normalizePair(np));
+      selectedPairId = pair.id;
+      selectedTargetIndex = pair.targets.length - 1;
+      markPairsDirty();
+      renderPairs();
+      return;
+    }
+    const rmBtn = e.target.closest("[data-remove-target]");
+    if (rmBtn) {
+      const pair = pairs.find((p) => String(p.id) === rmBtn.getAttribute("data-remove-target"));
+      if (!pair) return;
+      const np = normalizePair(pair);
+      if (np.targets.length <= 1) return;
+      const idx = Math.max(0, Math.min(np.targets.length - 1, selectedTargetIndex));
+      np.targets.splice(idx, 1);
+      Object.assign(pair, normalizePair(np));
+      selectedTargetIndex = Math.max(0, Math.min(pair.targets.length - 1, idx - 1));
+      markPairsDirty();
+      renderPairs();
+    }
+  });
+  el.pairsList.addEventListener("change", (e) => {
+    const wrap = e.target.closest("[data-edit-pair]");
+    if (!wrap) return;
+    const pair = pairs.find((p) => String(p.id) === wrap.getAttribute("data-edit-pair"));
+    if (!pair) return;
+    const idx = Number(wrap.getAttribute("data-edit-index")) || 0;
+    const np = normalizePair(pair);
+    const t = np.targets[idx];
+    if (!t) return;
+    const field = e.target.getAttribute("data-field");
+    if (!field) return;
+    if (field === "auto_distance") {
+      t.auto_distance = !!e.target.checked;
+      if (t.auto_distance) {
+        const spd = t.speed_mps != null ? t.speed_mps : clipSpeedCache.get(t.clip);
+        if (spd != null && Number.isFinite(spd)) {
+          t.target_offset = { ...t.target_offset, forward: Number((spd * (Number(t.seconds) || 1)).toFixed(3)) };
+        }
+      }
+    } else if (field === "forward" || field === "right" || field === "turn_deg") {
+      t.target_offset = { ...t.target_offset, [field]: Number(e.target.value) || 0 };
+      if (field === "forward") t.auto_distance = false;
+    } else if (field === "seconds") {
+      t.seconds = Math.max(0.05, Number(e.target.value) || 1);
+      if (t.auto_distance) {
+        const spd = t.speed_mps != null ? t.speed_mps : clipSpeedCache.get(t.clip);
+        if (spd != null && Number.isFinite(spd)) {
+          t.target_offset = { ...t.target_offset, forward: Number((spd * t.seconds).toFixed(3)) };
+        }
+      }
+    } else if (field === "poses_to_use") {
+      t.poses_to_use = Math.max(1, Math.min(4, Number(e.target.value) || 4));
+    } else if (field === "transition_early") {
+      t.transition_early = Math.max(0, Math.min(200, Number(e.target.value) || 0));
+    } else if (field === "tokens_min" || field === "tokens_max") {
+      let a = Number(wrap.querySelector('[data-field="tokens_min"]').value) || 8;
+      let b = Number(wrap.querySelector('[data-field="tokens_max"]').value) || 14;
+      a = Math.max(6, Math.min(16, a));
+      b = Math.max(6, Math.min(16, b));
+      if (a > b) [a, b] = [b, a];
+      t.tokens_min = a;
+      t.tokens_max = b;
+    }
+    Object.assign(pair, normalizePair(np));
+    markPairsDirty();
+    renderPairs();
   });
   el.pairsList.addEventListener(
     "toggle",
@@ -1645,6 +1831,44 @@ if (el.pairsList) {
     },
     true
   );
+}
+
+function bindStagingOptions() {
+  const sync = () => {
+    updateStagingReadouts();
+    applyAutoDistanceToStaging();
+  };
+  for (const node of [el.optSeconds, el.optTokensMin, el.optTokensMax, el.optForward, el.optRight, el.optTurn, el.optPoses, el.optEarly]) {
+    if (node) node.addEventListener("change", sync);
+    if (node) node.addEventListener("input", () => updateStagingReadouts());
+  }
+  if (el.optAutoDistance) {
+    el.optAutoDistance.addEventListener("change", () => {
+      applyAutoDistanceToStaging();
+      updateStagingReadouts();
+    });
+  }
+  if (el.optForward) {
+    el.optForward.addEventListener("change", () => {
+      if (el.optAutoDistance) el.optAutoDistance.checked = false;
+    });
+  }
+  updateStagingReadouts();
+}
+bindStagingOptions();
+
+if (el.footContactsToggle) {
+  el.footContactsToggle.addEventListener("change", () => {
+    showFootContacts = !!el.footContactsToggle.checked;
+    if (!showFootContacts) clearFootContactMarkers();
+  });
+}
+if (el.footContactThreshold) {
+  el.footContactThreshold.addEventListener("input", () => {
+    footContactThreshold = Number(el.footContactThreshold.value) || 0.5;
+    if (el.footThresholdReadout) el.footThresholdReadout.textContent = footContactThreshold.toFixed(2);
+    clearFootContactMarkers();
+  });
 }
 if (el.openFolderBtn) el.openFolderBtn.addEventListener("click", () => openAnimationFolder(false));
 if (el.reopenFolderBtn) el.reopenFolderBtn.addEventListener("click", () => reopenLastFolder());
@@ -1807,8 +2031,281 @@ function currentTargetOffset() {
   const f = Number(el.optForward && el.optForward.value) || 0;
   const r = Number(el.optRight && el.optRight.value) || 0;
   const t = Number(el.optTurn && el.optTurn.value) || 0;
-  if (!f && !r && !t) return null;
   return { forward: f, right: r, turn_deg: t };
+}
+
+const FOOT_NAME_RE = /(left|l_|_l|right|r_|_r).*(foot|ankle|toe)|((foot|ankle|toe).*(left|right|l|r))/i;
+const SPEED_LOCOMOTION_EPS = 0.2; // m/s — Auto distance default-on above this
+
+function rawFramesLabel(tmin, tmax) {
+  const a = Math.max(6, Math.min(16, Number(tmin) || 8));
+  const b = Math.max(6, Math.min(16, Number(tmax) || 14));
+  return "Raw frames: " + a * 4 + " to " + b * 4;
+}
+
+function updateStagingReadouts() {
+  if (el.optRawFrames) {
+    el.optRawFrames.textContent = rawFramesLabel(el.optTokensMin && el.optTokensMin.value, el.optTokensMax && el.optTokensMax.value);
+  }
+  const spd = endPose && clipSpeedCache.has(endPose.clip) ? clipSpeedCache.get(endPose.clip) : null;
+  if (el.optSpeed) {
+    el.optSpeed.textContent = spd != null && Number.isFinite(spd) ? "Speed: " + spd.toFixed(3) + " m/s" : "Speed: —";
+  }
+}
+
+function defaultTargetFields() {
+  const seconds = Math.max(0.05, Number(el.optSeconds && el.optSeconds.value) || 1);
+  const auto = !!(el.optAutoDistance && el.optAutoDistance.checked);
+  const offset = currentTargetOffset();
+  let tmin = Math.max(6, Math.min(16, Number(el.optTokensMin && el.optTokensMin.value) || 8));
+  let tmax = Math.max(6, Math.min(16, Number(el.optTokensMax && el.optTokensMax.value) || 14));
+  if (tmin > tmax) [tmin, tmax] = [tmax, tmin];
+  return {
+    seconds,
+    auto_distance: auto,
+    target_offset: offset,
+    poses_to_use: Math.max(1, Math.min(4, Number(el.optPoses && el.optPoses.value) || 4)),
+    transition_early: Math.max(0, Math.min(200, Number(el.optEarly && el.optEarly.value) || 0)),
+    tokens_min: tmin,
+    tokens_max: tmax,
+  };
+}
+
+function makeTargetFromPose(pose, extras = {}) {
+  const base = defaultTargetFields();
+  const speed = clipSpeedCache.has(pose.clip) ? clipSpeedCache.get(pose.clip) : null;
+  // Auto distance: Set End checks the staging box when speed > 0.2; respect that checkbox here.
+  const auto = extras.auto_distance != null ? !!extras.auto_distance : !!base.auto_distance;
+  const seconds = extras.seconds != null ? extras.seconds : base.seconds;
+  let offset = extras.target_offset ? { ...extras.target_offset } : { ...base.target_offset };
+  if (auto && speed != null && Number.isFinite(speed)) {
+    offset = { ...offset, forward: Number((speed * seconds).toFixed(3)) };
+  }
+  return {
+    clip: pose.clip,
+    frame: pose.frame,
+    seconds,
+    speed_mps: speed,
+    auto_distance: auto,
+    target_offset: offset,
+    poses_to_use: extras.poses_to_use != null ? extras.poses_to_use : base.poses_to_use,
+    transition_early: extras.transition_early != null ? extras.transition_early : base.transition_early,
+    tokens_min: extras.tokens_min != null ? extras.tokens_min : base.tokens_min,
+    tokens_max: extras.tokens_max != null ? extras.tokens_max : base.tokens_max,
+  };
+}
+
+/** Upgrade legacy pairs (end + options) to start + targets[]. Keeps end in sync. */
+function normalizePair(p) {
+  if (!p || typeof p !== "object") return p;
+  const out = { ...p };
+  if (!Array.isArray(out.targets) || !out.targets.length) {
+    const end = out.end || { clip: "", frame: 0 };
+    const opt = out.options || {};
+    const to = (opt.target_offset) || { forward: 0, right: 0, turn_deg: 0 };
+    out.targets = [
+      {
+        clip: end.clip,
+        frame: end.frame,
+        seconds: opt.seconds != null ? opt.seconds : 1,
+        speed_mps: opt.speed_mps != null ? opt.speed_mps : null,
+        auto_distance: !!opt.auto_distance,
+        target_offset: {
+          forward: Number(to.forward) || 0,
+          right: Number(to.right) || 0,
+          turn_deg: Number(to.turn_deg) || 0,
+        },
+        poses_to_use: opt.poses_to_use != null ? opt.poses_to_use : 4,
+        transition_early: opt.transition_early != null ? opt.transition_early : 0,
+        tokens_min: opt.tokens_min != null ? opt.tokens_min : opt.tokens != null ? opt.tokens : 8,
+        tokens_max: opt.tokens_max != null ? opt.tokens_max : opt.tokens != null ? opt.tokens : 14,
+      },
+    ];
+  }
+  const last = out.targets[out.targets.length - 1];
+  out.end = { clip: last.clip, frame: last.frame };
+  // Mirror first target offset into options for older readers
+  const t0 = out.targets[0];
+  out.options = {
+    ...(out.options || {}),
+    target_offset: t0.target_offset,
+    poses_to_use: t0.poses_to_use,
+    transition_early: t0.transition_early,
+    tokens_min: t0.tokens_min,
+    tokens_max: t0.tokens_max,
+    seconds: t0.seconds,
+    auto_distance: t0.auto_distance,
+    speed_mps: t0.speed_mps,
+  };
+  return out;
+}
+
+function normalizeAllPairs() {
+  pairs = pairs.map(normalizePair);
+}
+
+function applyAutoDistanceToStaging() {
+  if (!el.optAutoDistance || !el.optAutoDistance.checked) return;
+  const spd = endPose && clipSpeedCache.has(endPose.clip) ? clipSpeedCache.get(endPose.clip) : null;
+  if (spd == null || !Number.isFinite(spd)) return;
+  const seconds = Math.max(0.05, Number(el.optSeconds && el.optSeconds.value) || 1);
+  if (el.optForward) el.optForward.value = String(Number((spd * seconds).toFixed(3)));
+}
+
+/**
+ * Horizontal root/hips speed in m/s from the loaded FBX animation.
+ * Samples the root bone's world XZ over the clip; scales cm→m when the figure is clearly centimetre-sized.
+ */
+function measureLoadedClipSpeed() {
+  if (!model || !mixer || currentDuration <= 0) return null;
+  const root = findRootBone(model) || rootBone;
+  if (!root) return null;
+  const saved = mixer.time;
+  const playingWas = playing;
+  setPlaying(false);
+  const samples = Math.min(48, Math.max(8, Math.ceil(currentDuration * DISPLAY_FPS / 4)));
+  const pts = [];
+  const p = new THREE.Vector3();
+  for (let i = 0; i <= samples; i++) {
+    const t = (i / samples) * Math.max(0, currentDuration - 1e-4);
+    mixer.setTime(t);
+    model.updateMatrixWorld(true);
+    root.getWorldPosition(p);
+    pts.push([p.x, p.y, p.z]);
+  }
+  mixer.setTime(saved);
+  model.updateMatrixWorld(true);
+  if (playingWas) setPlaying(true);
+  let dist = 0;
+  let maxY = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - pts[i - 1][0];
+    const dz = pts[i][2] - pts[i - 1][2];
+    dist += Math.hypot(dx, dz);
+    maxY = Math.max(maxY, Math.abs(pts[i][1]), Math.abs(pts[i - 1][1]));
+  }
+  // FBX packs are often in centimetres (hips ~100); SOMA/MotionBricks use metres.
+  const toMeters = maxY > 10 ? 0.01 : 1;
+  const speed = (dist * toMeters) / currentDuration;
+  return Number.isFinite(speed) ? speed : null;
+}
+
+function cacheSpeedForSelectedClip() {
+  if (!selectedPath || isVirtualPath(selectedPath)) return;
+  try {
+    const spd = measureLoadedClipSpeed();
+    if (spd == null) return;
+    clipSpeedCache.set(selectedPath, spd);
+    if (endPose && endPose.clip === selectedPath) {
+      if (el.optAutoDistance && spd > SPEED_LOCOMOTION_EPS) el.optAutoDistance.checked = true;
+      applyAutoDistanceToStaging();
+      updateStagingReadouts();
+    }
+  } catch (err) {
+    console.warn("speed measure failed", err);
+  }
+}
+
+function ensureFootContactGroup() {
+  if (footContactGroup) return footContactGroup;
+  footContactGroup = new THREE.Group();
+  footContactGroup.name = "foot-contact-markers";
+  scene.add(footContactGroup);
+  return footContactGroup;
+}
+
+function clearFootContactMarkers() {
+  footContactTrail = [];
+  if (!footContactGroup) return;
+  while (footContactGroup.children.length) {
+    const c = footContactGroup.children.pop();
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) c.material.dispose();
+  }
+}
+
+function findFootBones(object) {
+  const feet = [];
+  if (!object) return feet;
+  object.traverse((o) => {
+    if (!o.isBone || !o.name) return;
+    if (FOOT_NAME_RE.test(o.name) || /foot|ankle/i.test(o.name)) feet.push(o);
+  });
+  // Prefer one left + one right foot (not every toe)
+  const preferred = feet.filter((b) => /foot|ankle/i.test(b.name) && !/toe/i.test(b.name));
+  return preferred.length ? preferred.slice(0, 4) : feet.slice(0, 4);
+}
+
+function updateFootContactMarkers() {
+  if (!showFootContacts || !model) {
+    if (footContactGroup) footContactGroup.visible = false;
+    return;
+  }
+  const group = ensureFootContactGroup();
+  group.visible = true;
+  const feet = findFootBones(model);
+  if (!feet.length) return;
+  model.updateMatrixWorld(true);
+  const thr = footContactThreshold;
+  // Heuristic: contact when normalized height above ground is low AND horizontal speed is low.
+  // Threshold 0.5 ≈ MotionBricks foot-contact probability cutoff; map to height/speed gates.
+  const heightGate = 0.04 + (1 - thr) * 0.12; // metres (after unit scale)
+  const speedGate = 0.15 + (1 - thr) * 0.6; // m/s
+  const p = new THREE.Vector3();
+  let maxY = 0;
+  const positions = [];
+  for (const b of feet) {
+    b.getWorldPosition(p);
+    maxY = Math.max(maxY, Math.abs(p.y));
+    positions.push(p.clone());
+  }
+  const toMeters = maxY > 10 ? 0.01 : 1;
+  const ground = Math.min(...positions.map((v) => v.y)) * toMeters;
+  const frameKey = Math.round((mixer ? mixer.time : 0) * DISPLAY_FPS);
+  for (let i = 0; i < feet.length; i++) {
+    const world = positions[i];
+    const y = world.y * toMeters;
+    // Approximate velocity from bone userData trail
+    const ud = feet[i].userData;
+    let speed = 0;
+    if (ud._fcPrev) {
+      const dt = Math.max(1e-3, (mixer ? mixer.time : 0) - (ud._fcPrevT || 0));
+      speed =
+        Math.hypot(world.x - ud._fcPrev.x, world.z - ud._fcPrev.z) * toMeters / dt;
+    }
+    ud._fcPrev = world.clone();
+    ud._fcPrevT = mixer ? mixer.time : 0;
+    const height = y - ground;
+    if (height <= heightGate && speed <= speedGate) {
+      footContactTrail.push({
+        x: world.x,
+        y: 0.01,
+        z: world.z,
+        frame: frameKey,
+      });
+    }
+  }
+  // Keep a short trail so sliding reads as a streak of markers
+  if (footContactTrail.length > 240) footContactTrail.splice(0, footContactTrail.length - 240);
+  while (group.children.length < footContactTrail.length) {
+    const geo = new THREE.SphereGeometry(0.025, 8, 8);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xe0a14a, transparent: true, opacity: 0.75, depthWrite: false });
+    group.add(new THREE.Mesh(geo, mat));
+  }
+  while (group.children.length > footContactTrail.length) {
+    const c = group.children.pop();
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) c.material.dispose();
+  }
+  for (let i = 0; i < footContactTrail.length; i++) {
+    const m = group.children[i];
+    const t = footContactTrail[i];
+    const scale = maxY > 10 ? 100 : 1; // place markers in scene units
+    m.position.set(t.x, t.y * scale, t.z);
+    m.scale.setScalar(scale);
+    const age = footContactTrail.length - i;
+    m.material.opacity = Math.max(0.2, 0.85 - age / 300);
+  }
 }
 
 function updateHelperPill() {
@@ -2015,13 +2512,17 @@ async function generatePair(pair, { autoView = false } = {}) {
   const entry = { state: "queued", step: "queued", progress: 0, lines: [], warnings: [], results: [], error: null, since: 0, autoView };
   gen.set(pair.id, entry);
   renderPairs();
+  const np = normalizePair(pair);
+  // Keep in-memory pair upgraded so later saves persist new fields
+  Object.assign(pair, np);
   const body = {
     id: pair.id,
     name: pairName(pair),
     start: pair.start,
     end: pair.end,
+    targets: pair.targets,
     variants: pair.variants || 1,
-    options: { target_offset: (pair.options && pair.options.target_offset) || undefined },
+    options: pair.options || {},
   };
   try {
     const r = await startGenerate(body);

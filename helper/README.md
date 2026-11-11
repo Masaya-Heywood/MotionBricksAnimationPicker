@@ -38,11 +38,14 @@ Test without a GPU: `python server.py --mock --soma-json <soma_skeleton.json>` r
 ## What the pair becomes
 
 * **Context**: 4 poses at times `start-3 .. start` (frames, 30 fps) from the start clip, moved so the last one stands on the origin at the SOMA rest heading (ground position and heading removed, height kept). The engine removes ground position and heading of the last context pose itself; the converter does the same so the BVHs are self-consistent and the target can be placed relative to it.
-* **Target**: up to 4 poses from the end frame (`poses_to_use`, default 4). `options.target_offset {forward, right, turn_deg}` (also the three boxes under the pairs list) places the end pose relative to the start pose (metres, degrees, + = left). Zero means the end pose keeps whatever heading and offset it would have standing on the origin.
-* **Length**: variant 1 lets the model pick (8-14 tokens = 26-50 frames at 30 fps). Variant k > 1 pins the token count (10, 12, 8, 14, 9, 11, 13) so variants have different lengths even if the model is deterministic. `options.tokens` (6-16) pins all of them.
+* **Target(s)**: one or more targets (`targets[]` on the request; legacy `end` + `options` becomes a single target). Each target sends up to `poses_to_use` poses (1–4, default 4) from its frame. `target_offset {forward, right, turn_deg}` places that pose relative to the previous keypose (metres, degrees, + = left). The page can Auto-fill `forward = speed_mps × seconds` from the end clip’s horizontal root speed.
+* **Tokens**: `tokens_min` / `tokens_max` (default 8–14) become `MotionBricksInferenceConfig(allowed_token_counts=range(min, max+1))`, same as the Inbetweener. Raw frames readout = 4×tokens (32–56 for 8–14); the engine’s valid output length is still `4*tokens - 6` after boundary trim. Equal min/max fixes length. Variant k > 1 pins a count inside the range. Legacy `options.tokens` still pins min=max.
+* **Transition early**: `transition_early` (frames, default 0) shortens how much of a segment is kept before chaining the next target: `segment_end = max(3, num_frames - 1 - early)`, matching the Inbetweener. The next context is the last four played frames.
+* **Chaining**: with multiple targets the helper generates Start→T1, then T1→T2, …, concatenates the played frames into one BVH/FBX. Single-target pairs stay backward compatible.
 * Window times outside the clip are clamped and a warning is shown on the pair (hover the warning mark).
 * **Fingers** (and any bone matching `passthrough_regex`) are not sent to the model. On the way back they are blended between the start frame's and the end frame's finger pose.
-* Result root motion starts at the start pose's SOMA ground position and ends at the placed target.
+* Result root motion starts at the start pose's SOMA ground position and ends at the placed final target.
+* The page’s **Foot contacts** toggle is a viewport heuristic (foot height + speed vs threshold, default 0.5). The real engine also exposes `output.foot_contacts`; mock mode writes a synthetic contacts curve.
 
 ## Bone maps and gaps
 

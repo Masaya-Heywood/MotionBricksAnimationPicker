@@ -42,10 +42,29 @@ def valid_frames(tokens):
     return tokens * POSES_PER_TOKEN - 2 * BOUNDARY  # 6..16 tokens -> 18..58 frames
 
 
-def variant_tokens(variant, explicit=None):
-    """Allowed token counts for a variant (1-based). None = engine default (8..14)."""
-    if explicit:
+def variant_tokens(variant, explicit=None, tokens_min=None, tokens_max=None):
+    """Allowed token counts for a variant (1-based).
+
+    - explicit: single int or sequence → pin those counts
+    - tokens_min/max: Inbetweener range (default 8..14). Variant 1 uses the full range;
+      later variants pin a count from VARIANT_TOKENS, clipped into the range.
+    - None/None with no explicit → engine default (None → Config() uses 8..14)
+    """
+    if explicit is not None:
+        if isinstance(explicit, (list, tuple)):
+            return tuple(int(x) for x in explicit)
         return (int(explicit),)
+    if tokens_min is not None or tokens_max is not None:
+        lo = int(tokens_min if tokens_min is not None else DEFAULT_TOKEN_COUNTS[0])
+        hi = int(tokens_max if tokens_max is not None else DEFAULT_TOKEN_COUNTS[-1])
+        if lo > hi:
+            lo, hi = hi, lo
+        if variant <= 1:
+            return tuple(range(lo, hi + 1))
+        pinned = VARIANT_TOKENS[(max(1, variant) - 1) % len(VARIANT_TOKENS)]
+        if pinned is None:
+            return tuple(range(lo, hi + 1))
+        return (max(lo, min(hi, int(pinned))),)
     t = VARIANT_TOKENS[(max(1, variant) - 1) % len(VARIANT_TOKENS)]
     return None if t is None else (t,)
 
@@ -58,6 +77,49 @@ def save_bvh(path, joint_names, parent_indices, reference_pos_m, poses):
     R = quat_to_mat(poses[:, :, 3:7])
     return write_bvh(path, list(joint_names), list(parent_indices), np.asarray(reference_pos_m), R,
                      poses[:, 0, :3], MODEL_SAMPLE_RATE)
+
+
+def write_context_from_poses(path, joint_names, parent_indices, reference_pos_m, poses, soma=None,
+                             transition_early=0):
+    """Write the last four *played* frames of a generated segment as a context BVH.
+
+    Matches Inbetweener step(): segment_end = max(3, num_frames-1-early); context = poses[end-3:end+1],
+    then place_window so the last frame sits on the origin (engine-compatible).
+    """
+    from mbh.retarget import place_window
+    from request_schema import played_frame_count
+
+    poses = np.asarray(poses, dtype=np.float64)
+    played = played_frame_count(len(poses), transition_early)
+    end = played - 1
+    window = poses[end - (POSES_PER_TOKEN - 1):end + 1]
+    R = quat_to_mat(window[:, :, 3:7])
+    root = window[:, 0, :3].copy()
+    if soma is not None:
+        R, root = place_window(soma, R, root, ref_index=POSES_PER_TOKEN - 1)
+    return write_bvh(path, list(joint_names), list(parent_indices), np.asarray(reference_pos_m), R, root,
+                     MODEL_SAMPLE_RATE)
+
+
+def concat_segment_poses(segments):
+    """Concatenate played pose arrays. segments: list of (poses, transition_early).
+
+    First segment keeps frames[0:played]; later segments drop frame 0 (junction duplicate).
+    """
+    from request_schema import played_frame_count
+
+    out = []
+    for i, (poses, early) in enumerate(segments):
+        poses = np.asarray(poses, dtype=np.float64)
+        n = played_frame_count(len(poses), early)
+        chunk = poses[:n]
+        if i > 0:
+            chunk = chunk[1:]
+        if len(chunk):
+            out.append(chunk)
+    if not out:
+        raise ValueError("no frames to concatenate")
+    return np.concatenate(out, axis=0)
 
 
 def _poses_from_bvh(path, names):
@@ -78,16 +140,17 @@ class MockRunner(object):
     def info(self):
         return {"engine": "mock", "gpu": False}
 
-    def generate(self, context_bvh, target_bvh, tokens=None, variant=1, log=print, **_):
+    def generate(self, context_bvh, target_bvh, tokens=None, variant=1, tokens_min=None, tokens_max=None,
+                 log=print, **_):
         soma = self.soma
         cR, cP = _poses_from_bvh(context_bvh, soma.names)
         tR, tP = _poses_from_bvh(target_bvh, soma.names)
-        counts = tokens or variant_tokens(variant) or (11,)  # variants differ in length so they are distinguishable
+        counts = variant_tokens(variant, explicit=tokens, tokens_min=tokens_min, tokens_max=tokens_max) or (11,)
         n_tokens = counts[len(counts) // 2]
         T = valid_frames(n_tokens)
         A, B = cR[-1], tR[0]
         poses = np.empty((T, soma.J, 7))
-        log("mock engine: %d tokens -> %d frames (linear stand-in, NOT MotionBricks)" % (n_tokens, T))
+        log("mock engine: tokens %s -> %d frames (linear stand-in, NOT MotionBricks)" % (counts, T))
         for f in range(T):
             u = f / float(T - 1)
             e = u * u * (3 - 2 * u)
@@ -95,7 +158,12 @@ class MockRunner(object):
                 poses[f, j, :3] = soma.rest_pos[j]
                 poses[f, j, 3:] = mat_to_quat(slerp_mats(A[j], B[j], e))
             poses[f, 0, :3] = (1 - e) * cP[-1] + e * tP[0]
-        return poses, None, {"frames": T, "tokens": n_tokens}
+        # Synthetic foot contacts: high when root is near the start/end (mock only)
+        contacts = np.zeros((T, 4), dtype=np.float32)
+        for f in range(T):
+            u = f / float(max(1, T - 1))
+            contacts[f] = 0.2 + 0.8 * (1.0 - abs(2 * u - 1.0))
+        return poses, contacts, {"frames": T, "tokens": n_tokens, "allowed_token_counts": list(counts)}
 
 
 class RealRunner(object):
@@ -160,13 +228,16 @@ class RealRunner(object):
                 self._ready = False
 
     # -- one generation -------------------------------------------------------------------------
-    def generate(self, context_bvh, target_bvh, tokens=None, variant=1, log=print, **_):
+    def generate(self, context_bvh, target_bvh, tokens=None, variant=1, tokens_min=None, tokens_max=None,
+                 n_target_poses=None, log=print, **_):
         self._setup(log)
         wp, eng = self.wp, self.engine
         ctx_clip = self.load_bvh(str(context_bvh), self.skeleton)  # remaps by joint name to the SOMA skeleton
         tgt_clip = self.load_bvh(str(target_bvh), self.skeleton)
-        n_target = min(POSES_PER_TOKEN, int(tgt_clip.num_frames))
-        counts = tokens or variant_tokens(variant)
+        want = POSES_PER_TOKEN if n_target_poses is None else max(1, min(POSES_PER_TOKEN, int(n_target_poses)))
+        n_target = min(want, int(tgt_clip.num_frames))
+        counts = variant_tokens(variant, explicit=tokens, tokens_min=tokens_min, tokens_max=tokens_max)
+        # Inbetweener: allowed_token_counts=tuple(range(min, max+1))
         config = self.Config(allowed_token_counts=tuple(counts)) if counts else self.Config()
         stream_ctx = wp.ScopedStream(eng.stream) if eng.stream is not None else _Null()
         with stream_ctx:
@@ -183,8 +254,13 @@ class RealRunner(object):
             contacts = None
             if getattr(self.output, "foot_contacts", None) is not None:
                 contacts = self.output.foot_contacts[:frames].numpy().copy()
-        log("MotionBricks generated %d frames (%.2f s)" % (frames, frames / MODEL_SAMPLE_RATE))
-        return poses, contacts, {"frames": frames, "tokens": (frames + 2 * BOUNDARY) // POSES_PER_TOKEN}
+        log("MotionBricks generated %d frames (%.2f s), tokens %s, poses_to_use=%d" % (
+            frames, frames / MODEL_SAMPLE_RATE, counts or "default", n_target))
+        return poses, contacts, {
+            "frames": frames,
+            "tokens": (frames + 2 * BOUNDARY) // POSES_PER_TOKEN,
+            "allowed_token_counts": list(counts) if counts else list(DEFAULT_TOKEN_COUNTS),
+        }
 
     def skeleton_arrays(self):
         self._setup(print)

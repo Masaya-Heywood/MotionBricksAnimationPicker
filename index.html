@@ -56,11 +56,18 @@
           <button id="load-pairs-btn" type="button">Open pairs.json</button>
           <button id="generate-all-btn" type="button" disabled title="Needs the local helper">Generate all</button>
         </div>
-        <div id="gen-options" title="Where the end pose is placed relative to the start pose, in the start pose's heading frame. Leave at 0 to keep the end pose where it is in its own clip.">
-          <span>End pose offset</span>
+        <div id="gen-options" title="Defaults for the next target sent to a pair. Seconds is the time from the previous keypose; Auto distance fills forward = speed × seconds when the clip is locomoting.">
+          <span>Target defaults</span>
+          <label>sec <input id="opt-seconds" type="number" min="0.05" max="30" step="0.05" value="1" /></label>
+          <label class="check"><input id="opt-auto-distance" type="checkbox" /> Auto distance</label>
           <label>fwd <input id="opt-forward" type="number" step="0.05" value="0" /> m</label>
           <label>right <input id="opt-right" type="number" step="0.05" value="0" /> m</label>
           <label>turn <input id="opt-turn" type="number" step="5" value="0" /> &deg;</label>
+          <label>poses <input id="opt-poses" type="number" min="1" max="4" step="1" value="4" /></label>
+          <label>early <input id="opt-early" type="number" min="0" max="200" step="1" value="0" /> fr</label>
+          <label>tok <input id="opt-tokens-min" type="number" min="6" max="16" step="1" value="8" />–<input id="opt-tokens-max" type="number" min="6" max="16" step="1" value="14" /></label>
+          <span id="opt-raw-frames" class="opt-readout">Raw frames: 32 to 56</span>
+          <span id="opt-speed" class="opt-readout">Speed: —</span>
         </div>
         <div id="pairs-list"></div>
       </div>
@@ -114,6 +121,14 @@
           <button id="lock-root-btn" disabled>Lock root motion</button>
           <button id="grid-btn" class="active-flag">Ground grid</button>
           <button id="bones-btn" class="active-flag">Bones</button>
+          <label class="check flag-check" id="foot-contacts-label" title="Mark frames where foot height and speed are below the threshold (sliding becomes visible).">
+            <input id="foot-contacts-toggle" type="checkbox" /> Foot contacts
+          </label>
+          <label class="slider" id="foot-threshold-label" title="Contact threshold (0–1). Default 0.5.">
+            Threshold
+            <input id="foot-contact-threshold" type="range" min="0" max="1" step="0.05" value="0.5" />
+            <span id="foot-threshold-readout">0.50</span>
+          </label>
           <button id="reset-cam-btn" disabled>Reset camera</button>
           <button id="set-start-btn" disabled>Set Start</button>
           <button id="set-end-btn" disabled>Set End</button>
@@ -160,6 +175,6 @@
   </div>
   <input id="folder-input" type="file" webkitdirectory multiple hidden />
   <input id="pairs-input" type="file" accept="application/json,.json" hidden />
-  <script type="module" src="app.js?v=20261111b"></script>
+  <script type="module" src="app.js?v=20261111c"></script>
 </body>
 </html>

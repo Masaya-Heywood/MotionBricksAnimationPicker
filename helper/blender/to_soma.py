@@ -2,10 +2,10 @@
 
 Spec JSON keys: soma_json, bonemaps, name, out_dir, result_json,
   start {fbx, frame, rig?}, end {fbx, frame, rig?}, poses_to_use (1-4),
-  target_offset {forward, right, turn_deg}
+  target_offset {forward, right, turn_deg}, only ("both"|"target")
 Writes <out_dir>/<name>__context.bvh (4 poses ending at the start frame, standing on the origin)
-and <out_dir>/<name>__target.bvh (1-4 poses starting at the end frame, placed by target_offset),
-plus <out_dir>/<name>__meta.json (rig summaries, finger poses to carry through, warnings).
+and <out_dir>/<name>__target.bvh (1-4 poses starting at the end frame, placed by target_offset).
+only="target" skips context (used when chaining from a previous generated segment).
 """
 import os
 import sys
@@ -60,12 +60,20 @@ def main():
     out_dir = spec["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
     warnings = []
-    s, e = spec["start"], spec["end"]
+    # only: None/"both" | "target" (skip context; used when chaining from a previous segment)
+    only = (spec.get("only") or "both").lower()
+    s, e = spec.get("start") or {}, spec["end"]
+    res_s = rt_s = None
+    dur_s = fingers_s = None
+    ctx_path = os.path.join(out_dir, name + "__context.bvh")
+    tgt_path = os.path.join(out_dir, name + "__target.bvh")
     try:
-        # context: 4 poses ending at the start frame
-        ctx_times = [(s["frame"] - 3 + i) / DISPLAY_FPS for i in range(4)]
-        ctx_R, ctx_root, res_s, rt_s, dur_s, fingers_s, _ = convert_window(
-            s, soma, maps, ctx_times, 3, {}, warnings, "start")
+        if only != "target":
+            # context: 4 poses ending at the start frame
+            ctx_times = [(s["frame"] - 3 + i) / DISPLAY_FPS for i in range(4)]
+            ctx_R, ctx_root, res_s, rt_s, dur_s, fingers_s, _ = convert_window(
+                s, soma, maps, ctx_times, 3, {}, warnings, "start")
+            write_bvh(ctx_path, soma.names, soma.parents, soma.rest_pos, ctx_R, ctx_root, DISPLAY_FPS)
         # target: up to 4 poses starting at the end frame (only poses that exist in the clip)
         want = max(1, min(4, int(spec.get("poses_to_use", 4))))
 
@@ -81,32 +89,34 @@ def main():
                          turn_deg=float(off.get("turn_deg", 0.0)))
         tgt_R, tgt_root, res_e, rt_e, dur_e2, fingers_e, tgt_times = convert_window(
             e, soma, maps, target_times, 0, placement, warnings, "end")
+        write_bvh(tgt_path, soma.names, soma.parents, soma.rest_pos, tgt_R, tgt_root, DISPLAY_FPS)
     except Exception as err:  # noqa: BLE001
         fail(spec, str(err))
         return
-    names = soma.names
-    offs = soma.rest_pos
-    ctx_path = os.path.join(out_dir, name + "__context.bvh")
-    tgt_path = os.path.join(out_dir, name + "__target.bvh")
-    write_bvh(ctx_path, names, soma.parents, offs, ctx_R, ctx_root, DISPLAY_FPS)
-    write_bvh(tgt_path, names, soma.parents, offs, tgt_R, tgt_root, DISPLAY_FPS)
-    log("wrote %s (4 poses) and %s (%d poses)" % (ctx_path, tgt_path, len(tgt_times)))
-    write_result(spec, {
+    if only != "target":
+        log("wrote %s (4 poses) and %s (%d poses)" % (ctx_path, tgt_path, len(tgt_times)))
+    else:
+        log("wrote %s only (%d poses); context supplied by previous segment" % (tgt_path, len(tgt_times)))
+    result = {
         "ok": True,
-        "context_bvh": ctx_path,
+        "context_bvh": None if only == "target" else ctx_path,
         "target_bvh": tgt_path,
         "target_poses": len(tgt_times),
-        "rig_start": res_s.summary(),
         "rig_end": res_e.summary(),
-        "same_rig": res_s.rig_id == res_e.rig_id,
-        "finger_start": fingers_s,
         "finger_end": fingers_e,
-        "start_clip_seconds": dur_s,
         "end_clip_seconds": dur_e2,
-        "scale_start": rt_s.scale,
         "scale_end": rt_e.scale,
         "warnings": warnings,
-    })
+    }
+    if res_s is not None:
+        result.update({
+            "rig_start": res_s.summary(),
+            "same_rig": res_s.rig_id == res_e.rig_id,
+            "finger_start": fingers_s,
+            "start_clip_seconds": dur_s,
+            "scale_start": rt_s.scale,
+        })
+    write_result(spec, result)
 
 
 main()

@@ -610,10 +610,11 @@ export function downloadBlob(filename, blob) {
 }
 
 export const PAIR_NOTE =
-  "Input for a future MotionBricks / SOMA batch script. " +
-  "clip paths are relative to the FBX root. frame is an integer at 30 fps " +
-  "display time. name (optional) is the output name the local helper uses for the generated BVH/FBX; " +
-  "options.target_offset (optional) places the end pose {forward, right (m), turn_deg}. " +
+  "Input for the local MotionBricks helper. clip paths are relative to the FBX root; " +
+  "frame is an integer at 30 fps display time. Each pair has start plus targets[] " +
+  "(legacy end + options.target_offset still accepted). Per target: seconds (time from " +
+  "previous keypose), speed_mps, auto_distance, target_offset {forward,right,turn_deg}, " +
+  "poses_to_use (1-4), transition_early (frames), tokens_min/max (6-16; raw frames = 4×tokens). " +
   "Saving this file does not launch anything; use Generate with the local helper running.";
 
 export function defaultPairsDoc() {
