@@ -80,7 +80,7 @@ Clip paths are relative to the folder you opened. Frame numbers use the 30 fps d
 - This static build does **not** convert unreadable FBX through Blender or FBX2glTF. That fallback exists only in the optional local Python server version of the tool.
 - Very large files (tens of megabytes) can take a few seconds to load. The viewer does not keep previous clips in memory.
 - External texture files sitting next to an FBX may not always show up; embedded textures usually do. Fingers, props, and weapons only appear if they are in the FBX itself.
-- Mesh-model detection (so animation-only files do not appear in the Body menu) runs in the browser: filename hints, plus a cheap scan for Geometry / Deformer nodes. Results are cached in IndexedDB by path, size, and last-modified time.
+- Mesh-model detection (so animation-only files do not appear in the Body menu) runs in the browser. A file is listed only if it is a genuine character mesh: skinned Geometry with a substantial vertex count, and either a model-like name or folder (`SK_`, `_Model`, `Models/`, `Characters/`) or almost no animation curves. Clips named with `@`, files under `Animations/`, and skinned files that carry a full clip are excluded; if in doubt, the file is left out. Results are cached in IndexedDB by path, size, and last-modified time (cache version 2).
 - Auto body matching is configurable in `body-presets.json` if you fork the project.
 - This tool is for preview and picking poses. It does not write clips back out, and it does not talk to Unity or MotionBricks.
 

@@ -2,7 +2,7 @@
 
 const DB_NAME = "animlab-clip-browser";
 const DB_VERSION = 1;
-const MODEL_CACHE_VERSION = 1;
+const MODEL_CACHE_VERSION = 2;
 
 let dbPromise = null;
 let current = {
@@ -356,32 +356,72 @@ export function resolveLocalResource(url, baseDir) {
   return blobUrl;
 }
 
-export function filenameModelHint(name, rel) {
+export const MIN_MODEL_VERTS = 256;
+export const MAX_NEGLIGIBLE_CURVES = 16;
+
+function normRel(rel) {
+  return String(rel || "").replace(/\\/g, "/").toLowerCase();
+}
+
+function pathParts(rel) {
+  return normRel(rel).split("/").filter(Boolean);
+}
+
+export function strongMeshName(name) {
   const nl = String(name || "").toLowerCase();
-  const pl = String(rel || "").replace(/\\/g, "/").toLowerCase();
-  if (nl.startsWith("sm_") || pl.includes("/prop/") || pl.includes("/props/")) return "no";
-  const strong =
+  return (
     nl.startsWith("sk_") ||
     nl.includes("_model") ||
     nl.endsWith("model.fbx") ||
     nl.includes("protof-actor") ||
-    nl.includes("protof-actress");
-  if (name.includes("@") && !strong) return "no";
-  if (strong) return "yes";
-  if (pl.includes("/models/") || pl.includes("/characters/") || !name.includes("@")) return "maybe";
+    nl.includes("protof-actress")
+  );
+}
+
+export function inModelFolder(rel) {
+  const parts = pathParts(rel);
+  const dirs = parts.slice(0, -1);
+  return dirs.some((p) => p === "models" || p === "characters" || p === "character" || p === "meshes");
+}
+
+export function inAnimFolder(rel) {
+  const parts = pathParts(rel);
+  const dirs = parts.slice(0, -1);
+  return dirs.some((p) => p === "animation" || p === "animations" || p === "anim" || p === "anims" || p === "clips");
+}
+
+export function filenameModelHint(name, rel) {
+  const nl = String(name || "").toLowerCase();
+  const pl = normRel(rel);
+  if (nl.startsWith("sm_") || pl.includes("/prop/") || pl.includes("/props/")) return "no";
+  if (String(name || "").includes("@")) return "no";
+  if (strongMeshName(name)) return "yes";
+  if (inAnimFolder(rel) && !inModelFolder(rel)) return "no";
+  if (inModelFolder(rel) || !String(name || "").includes("@")) return "maybe";
   return "no";
 }
 
-function indexOfBytes(haystack, needle) {
+function indexOfBytes(haystack, needle, from = 0) {
   const n = needle.length;
   const limit = haystack.length - n;
-  outer: for (let i = 0; i <= limit; i++) {
+  outer: for (let i = from; i <= limit; i++) {
     for (let j = 0; j < n; j++) {
       if (haystack[i + j] !== needle[j]) continue outer;
     }
     return i;
   }
   return -1;
+}
+
+function countNeedle(haystack, needle) {
+  let n = 0;
+  let start = 0;
+  while (true) {
+    const i = indexOfBytes(haystack, needle, start);
+    if (i < 0) return n;
+    n += 1;
+    start = i + Math.max(needle.length, 1);
+  }
 }
 
 function concatBytes(a, b) {
@@ -394,13 +434,49 @@ function concatBytes(a, b) {
 const GEO_BIN = Uint8Array.from([0x08, ...[...("Geometry")].map((c) => c.charCodeAt(0))]);
 const DEF_BIN = Uint8Array.from([0x08, ...[...("Deformer")].map((c) => c.charCodeAt(0))]);
 const SUBDEF_BIN = Uint8Array.from([0x0c, ...[...("SubDeformer")].map((c) => c.charCodeAt(0))]);
+const CURVE_BIN = Uint8Array.from([0x0e, ...[...("AnimationCurve")].map((c) => c.charCodeAt(0))]);
 const GEO_ASC = new TextEncoder().encode("Geometry:");
 const DEF_ASC = new TextEncoder().encode("Deformer:");
 const SUBDEF_ASC = new TextEncoder().encode("SubDeformer:");
+const CURVE_ASC = new TextEncoder().encode("AnimationCurve:");
+const VERTICES_NAME = new TextEncoder().encode("Vertices");
+const VERTICES_ASC = /Vertices:\s*\*(\d+)/g;
 
-export async function scanFbxNodes(file) {
-  let hasGeo = false;
-  let hasDef = false;
+export function maxVertexCount(data) {
+  let best = 0;
+  let start = 0;
+  while (true) {
+    const i = indexOfBytes(data, VERTICES_NAME, start);
+    if (i < 0) break;
+    const j = i + VERTICES_NAME.length;
+    if (j + 5 <= data.length && (data[j] === 0x64 || data[j] === 0x66)) {
+      const n = data[j + 1] | (data[j + 2] << 8) | (data[j + 3] << 16) | (data[j + 4] << 24);
+      if (n % 3 === 0 && n >= 3 && n <= 30000000) {
+        const verts = n / 3;
+        if (verts > best) best = verts;
+      }
+    }
+    start = i + 1;
+  }
+  try {
+    const text = new TextDecoder("latin1").decode(data);
+    VERTICES_ASC.lastIndex = 0;
+    let m;
+    while ((m = VERTICES_ASC.exec(text))) {
+      const n = parseInt(m[1], 10);
+      if (n % 3 === 0 && n >= 3 && n <= 30000000) {
+        const verts = n / 3;
+        if (verts > best) best = verts;
+      }
+    }
+  } catch {
+    /* ignore decode errors */
+  }
+  return best;
+}
+
+export async function scanFbxMesh(file) {
+  const out = { hasGeo: false, hasDef: false, maxVertices: 0, animCurves: 0 };
   try {
     const head = new Uint8Array(await file.slice(0, 32).arrayBuffer());
     const magic = new TextDecoder("latin1").decode(head.subarray(0, 21));
@@ -414,33 +490,47 @@ export async function scanFbxNodes(file) {
       const chunk = new Uint8Array(await file.slice(offset, end).arrayBuffer());
       const data = overlap.length ? concatBytes(overlap, chunk) : chunk;
       if (isBin) {
-        if (!hasGeo && indexOfBytes(data, GEO_BIN) >= 0) hasGeo = true;
-        if (!hasDef && (indexOfBytes(data, DEF_BIN) >= 0 || indexOfBytes(data, SUBDEF_BIN) >= 0)) {
-          hasDef = true;
+        if (!out.hasGeo && indexOfBytes(data, GEO_BIN) >= 0) out.hasGeo = true;
+        if (!out.hasDef && (indexOfBytes(data, DEF_BIN) >= 0 || indexOfBytes(data, SUBDEF_BIN) >= 0)) {
+          out.hasDef = true;
         }
+        out.animCurves += countNeedle(data, CURVE_BIN);
       } else {
-        if (!hasGeo && indexOfBytes(data, GEO_ASC) >= 0) hasGeo = true;
-        if (!hasDef && (indexOfBytes(data, DEF_ASC) >= 0 || indexOfBytes(data, SUBDEF_ASC) >= 0)) {
-          hasDef = true;
+        if (!out.hasGeo && indexOfBytes(data, GEO_ASC) >= 0) out.hasGeo = true;
+        if (!out.hasDef && (indexOfBytes(data, DEF_ASC) >= 0 || indexOfBytes(data, SUBDEF_ASC) >= 0)) {
+          out.hasDef = true;
         }
+        out.animCurves += countNeedle(data, CURVE_ASC);
       }
-      if (hasGeo && hasDef) break;
-      overlap = data.subarray(Math.max(0, data.length - 16));
+      const verts = maxVertexCount(data);
+      if (verts > out.maxVertices) out.maxVertices = verts;
+      overlap = data.subarray(Math.max(0, data.length - 64));
       offset = end;
     }
   } catch (err) {
-    console.warn("FBX header scan failed", err);
-    return { hasGeo: false, hasDef: false };
+    console.warn("FBX mesh scan failed", err);
   }
-  return { hasGeo, hasDef };
+  return out;
+}
+
+export async function scanFbxNodes(file) {
+  const s = await scanFbxMesh(file);
+  return { hasGeo: s.hasGeo, hasDef: s.hasDef, maxVertices: s.maxVertices, animCurves: s.animCurves };
 }
 
 export async function isMeshModel(name, rel, file, hint) {
   if (hint === "no") return false;
-  const { hasGeo, hasDef } = await scanFbxNodes(file);
-  if (!hasGeo) return false;
-  if (hasDef) return true;
-  return hint === "yes";
+  if (String(name || "").includes("@")) return false;
+  const scan = await scanFbxMesh(file);
+  if (!scan.hasGeo || !scan.hasDef) return false;
+  if (scan.maxVertices < MIN_MODEL_VERTS) return false;
+  const strong = strongMeshName(name) || inModelFolder(rel);
+  const inAnims = inAnimFolder(rel);
+  const hasClipCurves = scan.animCurves > MAX_NEGLIGIBLE_CURVES;
+  if (strong && !(inAnims && hasClipCurves && !inModelFolder(rel))) return true;
+  if (inAnims) return false;
+  if (hasClipCurves) return false;
+  return true;
 }
 
 /**
