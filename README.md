@@ -6,7 +6,7 @@ Your clips stay on your computer. This repository does **not** include any anima
 
 ## What it does
 
-- Browse every `.fbx` under a folder you pick, grouped by pack (top-level subfolder).
+- Browse every `.fbx` under a folder you pick, in a collapsible folder tree that follows the real folder structure. Single-child folder chains are merged into one row. Top-level folders start expanded; deeper ones stay collapsed until you open them (the state is remembered). Search auto-opens folders that have matches. Use Collapse all / Expand all, or hide a folder and reveal it later with Show hidden.
 - Play clips in a 3D viewport with play/pause, speed, a 30 fps scrubber, root-motion lock, a ground grid, and a bone overlay.
 - Preview clips on a real character mesh when one is in the folder. **Body → Auto** uses a small preset table (Kevin Iglesias → `HumanM_Model`, PROTOFACTOR → `SK_Protof-Actor`) and otherwise picks the mesh model in the same pack folder with the best bone-name overlap. You can also choose **Skeleton only** or a specific body.
 - Same-skeleton clips (about 90% of bone names match) bind directly. Cross-pack previews use rest-pose delta retargeting. Open **Details** for unmatched tracks, and **Name map** to edit synonyms.

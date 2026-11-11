@@ -12,6 +12,7 @@ import {
   bindClipExact,
   retargetClipRestRelative,
 } from "./retarget.js";
+import { createTreeList } from "./tree.js";
 import {
   supportsDirectoryPicker,
   supportsSaveFilePicker,
@@ -52,6 +53,9 @@ const el = {
   search: $("search"),
   starredToggle: $("starred-toggle"),
   clipList: $("clip-list"),
+  treeCollapseAll: $("tree-collapse-all"),
+  treeExpandAll: $("tree-expand-all"),
+  showHiddenToggle: $("show-hidden-toggle"),
   overlay: $("overlay"),
   hud: $("hud"),
   playBtn: $("play-btn"),
@@ -103,7 +107,7 @@ let allClips = [];
 let visibleClips = [];
 let selectedPath = null;
 let loadGen = 0;
-let collapsedPacks = new Set();
+let treeList = null;
 
 let playing = false;
 let isScrubbing = false;
@@ -273,83 +277,49 @@ function makeButton(label, className, onClick) {
 }
 
 // --- list -------------------------------------------------------------------
-function renderList() {
-  const q = el.search.value.trim().toLowerCase();
-  const starredOnly = el.starredToggle.checked;
-  const store = loadStore();
-  const filtered = allClips.filter((c) => {
-    if (starredOnly && !isStarred(c.path, store)) return false;
-    if (!q) return true;
-    return (c.path + " " + c.name + " " + c.folder + " " + c.pack)
-      .toLowerCase()
-      .includes(q);
+function ensureTree() {
+  if (treeList) return treeList;
+  treeList = createTreeList({
+    container: el.clipList,
+    countEl: el.clipCount,
+    getClips: () => allClips,
+    getQuery: () => (el.search && el.search.value) || "",
+    getStarredOnly: () => !!(el.starredToggle && el.starredToggle.checked),
+    isStarred,
+    getSelectedPath: () => selectedPath,
+    getRootId: () => (el.rootPath && (el.rootPath.title || el.rootPath.textContent)) || "_",
+    formatSize,
+    escapeHtml,
+    onSelect: (path, load) => setSelectedPath(path, load),
+    onToggleStar: (path) => toggleStar(path),
   });
-  visibleClips = filtered;
-
-  const groups = new Map();
-  for (const c of filtered) {
-    if (!groups.has(c.pack)) groups.set(c.pack, []);
-    groups.get(c.pack).push(c);
+  if (el.showHiddenToggle) {
+    el.showHiddenToggle.checked = treeList.getShowHidden();
   }
-
-  el.clipCount.textContent = allClips.length
-    ? `${filtered.length} of ${allClips.length} clips`
-    : "No clips";
-
-  if (!filtered.length) {
-    el.clipList.innerHTML = `<div class="empty-list">${
-      allClips.length
-        ? "No clips match this search."
-        : "No .fbx files found in this folder."
-    }</div>`;
-    return;
-  }
-
-  const parts = [];
-  for (const [pack, items] of groups) {
-    const collapsed = collapsedPacks.has(pack) ? " collapsed" : "";
-    parts.push(`<div class="pack${collapsed}" data-pack="${escapeHtml(pack)}">`);
-    parts.push(
-      `<div class="pack-head" data-toggle-pack="${escapeHtml(pack)}"><span class="twisty"></span>${escapeHtml(
-        pack
-      )}<span class="pack-count">${items.length}</span></div>`
-    );
-    parts.push(`<div class="pack-items">`);
-    for (const c of items) {
-      const active = c.path === selectedPath ? " active" : "";
-      const starred = isStarred(c.path, store) ? " starred" : "";
-      const sub = c.folder && c.folder !== c.pack ? c.folder : "";
-      parts.push(
-        `<div class="clip-item${active}${starred}" data-path="${escapeHtml(c.path)}" title="${escapeHtml(c.path)}">` +
-          `<span class="star" data-star-path="${escapeHtml(c.path)}">${starred ? "★" : "☆"}</span>` +
-          `<span class="clip-name">${escapeHtml(c.name)}</span>` +
-          `<span class="clip-size">${formatSize(c.size)}</span>` +
-          (sub ? `<span class="clip-sub">${escapeHtml(sub)}</span>` : "") +
-          `</div>`
-      );
-    }
-    parts.push(`</div></div>`);
-  }
-  el.clipList.innerHTML = parts.join("");
-  const active = el.clipList.querySelector(".clip-item.active");
-  if (active) active.scrollIntoView({ block: "nearest" });
+  window.__treeDebug = () => treeList && treeList.debug();
+  return treeList;
 }
 
-function setSelectedPath(path, shouldLoad) {
+function renderList(flags) {
+  visibleClips = ensureTree().render(flags) || ensureTree().getVisibleClips();
+}
+
+function setSelectedPath(path, shouldLoad, flags) {
   selectedPath = path;
-  renderList();
+  renderList(flags && flags.scrollToPath ? { scrollToPath: path } : {});
   updateMetaPanel();
   if (shouldLoad && path) loadClip(path);
 }
 
 function stepSelection(dir) {
-  if (!visibleClips.length) return;
-  const idx = visibleClips.findIndex((c) => c.path === selectedPath);
+  const clips = (treeList && treeList.getVisibleClips()) || visibleClips;
+  if (!clips.length) return;
+  const idx = clips.findIndex((c) => c.path === selectedPath);
   let next = idx + dir;
-  if (idx < 0) next = dir > 0 ? 0 : visibleClips.length - 1;
+  if (idx < 0) next = dir > 0 ? 0 : clips.length - 1;
   if (next < 0) next = 0;
-  if (next >= visibleClips.length) next = visibleClips.length - 1;
-  if (visibleClips[next]) setSelectedPath(visibleClips[next].path, true);
+  if (next >= clips.length) next = clips.length - 1;
+  if (clips[next]) setSelectedPath(clips[next].path, true, { scrollToPath: true });
 }
 
 // --- favorites --------------------------------------------------------------
@@ -1489,25 +1459,11 @@ function closeNameMap() {
 
 
 // --- events -----------------------------------------------------------------
-el.clipList.addEventListener("click", (e) => {
-  const packHead = e.target.closest("[data-toggle-pack]");
-  if (packHead) {
-    const pack = packHead.getAttribute("data-toggle-pack");
-    if (collapsedPacks.has(pack)) collapsedPacks.delete(pack);
-    else collapsedPacks.add(pack);
-    renderList();
-    return;
-  }
-  const star = e.target.closest("[data-star-path]");
-  if (star) {
-    e.preventDefault();
-    e.stopPropagation();
-    toggleStar(star.getAttribute("data-star-path"));
-    return;
-  }
-  const item = e.target.closest("[data-path]");
-  if (item) setSelectedPath(item.getAttribute("data-path"), true);
-});
+if (el.treeCollapseAll) el.treeCollapseAll.addEventListener("click", () => ensureTree().collapseAll());
+if (el.treeExpandAll) el.treeExpandAll.addEventListener("click", () => ensureTree().expandAll());
+if (el.showHiddenToggle) {
+  el.showHiddenToggle.addEventListener("change", () => ensureTree().setShowHidden(el.showHiddenToggle.checked));
+}
 
 el.search.addEventListener("input", renderList);
 el.starredToggle.addEventListener("change", renderList);
